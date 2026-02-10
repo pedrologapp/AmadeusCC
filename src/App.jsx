@@ -4,9 +4,9 @@ import { useState, useEffect, useCallback } from "react";
 // CONFIGURAÇÃO - Altere estas URLs para as suas
 // ============================================================
 const CONFIG = {
-  SUPABASE_URL: "https://SEU-PROJETO.supabase.co",
-  SUPABASE_ANON_KEY: "COLE_SUA_ANON_KEY_AQUI",
-  N8N_WEBHOOK_PROCESS_PDF: "https://seu-n8n.com/webhook/process-payroll-pdf",
+  SUPABASE_URL: "https://lzqhjutknqeuhscfxald.supabase.co",
+  SUPABASE_ANON_KEY: "sb_secret_vHp1qqxG_A-i7npeDiECZQ_-16SCNtE",
+  N8N_WEBHOOK_PROCESS_PDF: "https://webhook.escolaamadeus.com/webhook/process-payroll-pdf",
   N8N_WEBHOOK_SEND_EMAILS: "https://seu-n8n.com/webhook/send-payroll-emails",
 };
 
@@ -862,6 +862,7 @@ export default function PayrollApp() {
     </div>
   );
 }
+
 
 
 
