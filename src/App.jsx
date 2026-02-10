@@ -1,1211 +1,881 @@
-import React, { useState } from 'react';
-import './App.css';
-import { Button } from './components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
-import { Badge } from './components/ui/badge';
-import { Separator } from './components/ui/separator';
-import { Input } from './components/ui/input';
-import { Label } from './components/ui/label';
-import { supabase } from './supabaseClient';
+import { useState, useEffect, useRef } from "react";
 
-import { 
-  MapPin, 
-  Clock, 
-  Calendar, 
-  Users, 
-  CreditCard, 
-  FileText, 
-  Phone, 
-  Mail,
-  Bus,
-  Camera,
-  Shield,
-  Heart,
-  CheckCircle,
-  ArrowRight,
-  User,
-  X,
-  Plus,
-  Minus,
-  UserPlus,
-  Utensils,
-  XCircle,
-  AlertTriangle,
-  Search,
-  Filter
-} from 'lucide-react';
+const MOCK_EMPLOYEES = [
+  { id: 1, name: "Ana Paula Silva", email: "ana.silva@escola.com", role: "Professora de Matemática", baseSalary: 3200.00 },
+  { id: 2, name: "Carlos Eduardo Santos", email: "carlos.santos@escola.com", role: "Professor de História", baseSalary: 2800.00 },
+  { id: 3, name: "Mariana Costa Oliveira", email: "mariana.oliveira@escola.com", role: "Professora de Português", baseSalary: 3100.00 },
+  { id: 4, name: "Roberto Lima Pereira", email: "roberto.pereira@escola.com", role: "Professor de Educação Física", baseSalary: 2600.00 },
+  { id: 5, name: "Fernanda Alves Rodrigues", email: "fernanda.rodrigues@escola.com", role: "Coordenadora Pedagógica", baseSalary: 4500.00 },
+  { id: 6, name: "João Pedro Martins", email: "joao.martins@escola.com", role: "Professor de Ciências", baseSalary: 2900.00 },
+  { id: 7, name: "Patrícia Souza Lima", email: "patricia.lima@escola.com", role: "Professora de Inglês", baseSalary: 2750.00 },
+  { id: 8, name: "Lucas Ferreira Gomes", email: "lucas.gomes@escola.com", role: "Professor de Geografia", baseSalary: 2850.00 },
+];
 
-// Importando as imagens
-import interiorImage1 from './assets/happy1.JPG';
-import interiorImage2 from './assets/happy2.JPG';
-import jardimImage from './assets/happy3.JPG';
+const formatCurrency = (value) => {
+  return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(value);
+};
 
-function App() {
-  // ⚙️ CONFIGURAÇÃO - Séries permitidas (o turno está fixo como "Manhã")
-  const TURNOS_DISPONIVEIS = ['Manhã'];
-  const SERIES_DISPONIVEIS = ['Grupo IV','Grupo V', 'Maternal(3)', 'Maternalzinho(2)', '1º Ano', '2º Ano', '3º Ano', '4º Ano', '5º Ano','6º Ano', '7º Ano', '8º Ano' ,'9º Ano'];
+const StatusBadge = ({ status }) => {
+  const config = {
+    pending: { label: "Pendente", bg: "#FEF3C7", color: "#92400E", border: "#FCD34D" },
+    reviewed: { label: "Validado", bg: "#D1FAE5", color: "#065F46", border: "#6EE7B7" },
+    sent: { label: "Enviado", bg: "#DBEAFE", color: "#1E40AF", border: "#93C5FD" },
+  };
+  const c = config[status] || config.pending;
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 5,
+      padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 600,
+      background: c.bg, color: c.color, border: `1px solid ${c.border}`,
+      letterSpacing: 0.3, textTransform: "uppercase",
+    }}>
+      <span style={{
+        width: 6, height: 6, borderRadius: "50%", background: c.color,
+      }} />
+      {c.label}
+    </span>
+  );
+};
 
-  // Estados para o formulário
-  const [showForm, setShowForm] = useState(false);
-  const [formData, setFormData] = useState({
-    studentName: '',
-    studentGrade: '',
-    studentClass: '',
-    parentName: '',
-    cpf: '',
-    email: '',
-    phone: '',
-    paymentMethod: 'pix',
-    installments: 1
+const AdjustmentRow = ({ adj, onRemove, index }) => (
+  <div style={{
+    display: "flex", alignItems: "center", gap: 10,
+    padding: "8px 12px", borderRadius: 8,
+    background: adj.type === "add" ? "#F0FDF4" : "#FEF2F2",
+    border: `1px solid ${adj.type === "add" ? "#BBF7D0" : "#FECACA"}`,
+    fontSize: 13,
+  }}>
+    <span style={{
+      width: 22, height: 22, borderRadius: "50%", display: "flex",
+      alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 700,
+      background: adj.type === "add" ? "#22C55E" : "#EF4444", color: "#fff",
+    }}>
+      {adj.type === "add" ? "+" : "−"}
+    </span>
+    <span style={{ flex: 1, color: "#374151" }}>{adj.description}</span>
+    <span style={{
+      fontWeight: 700, fontFamily: "'JetBrains Mono', monospace",
+      color: adj.type === "add" ? "#16A34A" : "#DC2626",
+    }}>
+      {adj.type === "add" ? "+" : "−"} {formatCurrency(adj.value)}
+    </span>
+    <button onClick={() => onRemove(index)} style={{
+      background: "none", border: "none", cursor: "pointer",
+      color: "#9CA3AF", fontSize: 16, padding: 2,
+      transition: "color 0.2s",
+    }} onMouseOver={e => e.target.style.color = "#EF4444"}
+       onMouseOut={e => e.target.style.color = "#9CA3AF"}>
+      ✕
+    </button>
+  </div>
+);
+
+export default function PayrollApp() {
+  const [employees, setEmployees] = useState(
+    MOCK_EMPLOYEES.map(e => ({
+      ...e,
+      status: "pending",
+      adjustments: [],
+      paycheckExtracted: false,
+      extractedValue: null,
+    }))
+  );
+  const [selectedId, setSelectedId] = useState(null);
+  const [pdfUploaded, setPdfUploaded] = useState(false);
+  const [pdfProcessing, setPdfProcessing] = useState(false);
+  const [pdfProgress, setPdfProgress] = useState(0);
+  const [showSendModal, setShowSendModal] = useState(false);
+  const [sendingEmails, setSendingEmails] = useState(false);
+  const [emailsSent, setEmailsSent] = useState(0);
+  const [newAdj, setNewAdj] = useState({ type: "add", description: "", value: "" });
+  const [searchTerm, setSearchTerm] = useState("");
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [currentMonth] = useState(() => {
+    const d = new Date();
+    return d.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
   });
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [inscriptionSuccess, setInscriptionSuccess] = useState(false);
-  
-  // Estados para validação de CPF
-  const [cpfError, setCpfError] = useState('');
-  const [cpfValid, setCpfValid] = useState(false);
 
-  // Estados para busca de alunos no Supabase
-  const [studentSearch, setStudentSearch] = useState('');
-  const [studentsList, setStudentsList] = useState([]);
-  const [showStudentDropdown, setShowStudentDropdown] = useState(false);
-  const [selectedStudent, setSelectedStudent] = useState(null);
-  const [isSearching, setIsSearching] = useState(false);
+  const selected = employees.find(e => e.id === selectedId);
 
-  // FILTRO FIXO: Turno "Manhã" (não aparece na tela, mas funciona automaticamente)
-  const [selectedTurno, setSelectedTurno] = useState('Tarde'); // ← FIXO EM "MANHÃ"
-  const [selectedSerie, setSelectedSerie] = useState(''); // ← Vazio = todas as séries
-
-  // Estado para quantidade de ingressos
-  const [ticketQuantity, setTicketQuantity] = useState(1);
-
-  // Função para validar CPF
-  const validarCPF = (cpf) => {
-    cpf = cpf.replace(/[^\d]/g, '');
-    
-    if (cpf.length !== 11) return false;
-    if (/^(\d)\1{10}$/.test(cpf)) return false;
-    
-    let soma = 0;
-    let resto;
-    
-    for (let i = 1; i <= 9; i++) {
-      soma += parseInt(cpf.substring(i-1, i)) * (11 - i);
-    }
-    resto = (soma * 10) % 11;
-    if (resto === 10 || resto === 11) resto = 0;
-    if (resto !== parseInt(cpf.substring(9, 10))) return false;
-    
-    soma = 0;
-    for (let i = 1; i <= 10; i++) {
-      soma += parseInt(cpf.substring(i-1, i)) * (12 - i);
-    }
-    resto = (soma * 10) % 11;
-    if (resto === 10 || resto === 11) resto = 0;
-    if (resto !== parseInt(cpf.substring(10, 11))) return false;
-    
-    return true;
-  };
-
-  const scrollToSection = (sectionId) => {
-    document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth' });
-  };
-
-  const showInscricaoForm = () => {
-    setShowForm(true);
-    setTimeout(() => {
-      document.getElementById('formulario-inscricao')?.scrollIntoView({ behavior: 'smooth' });
-    }, 100);
-  };
-
-  // Função para buscar alunos no Supabase COM FILTRO AUTOMÁTICO DE TURNO
-  const searchStudents = async (searchTerm) => {
-    if (searchTerm.length < 2) {
-      setStudentsList([]);
-      setShowStudentDropdown(false);
-      return;
-    }
-
-    setIsSearching(true);
-    try {
-      let query = supabase
-        .from('alunos')
-        .select('*')
-        .ilike('nome_completo', `%${searchTerm}%`);
-
-      // FILTRO FIXO: sempre filtra por turno "Manhã"
-      if (selectedTurno) {
-        query = query.eq('turno', selectedTurno);
+  const handlePdfUpload = () => {
+    setPdfProcessing(true);
+    setPdfProgress(0);
+    let progress = 0;
+    const interval = setInterval(() => {
+      progress += Math.random() * 15 + 5;
+      if (progress >= 100) {
+        progress = 100;
+        clearInterval(interval);
+        setPdfProcessing(false);
+        setPdfUploaded(true);
+        setEmployees(prev => prev.map(e => ({
+          ...e,
+          paycheckExtracted: true,
+          extractedValue: e.baseSalary + (Math.random() * 400 - 200),
+        })));
       }
-
-      // Aplicar filtro de série se selecionado
-      if (selectedSerie) {
-        query = query.eq('serie', selectedSerie);
-      }
-
-          // Aplicar filtro de série se selecionado
-    if (selectedSerie) {
-      query = query.eq('serie', selectedSerie);
-    }
-
-      const { data, error } = await query
-        .order('nome_completo')
-        .limit(10);
-
-      if (error) throw error;
-      
-      setStudentsList(data || []);
-      setShowStudentDropdown(data && data.length > 0);
-    } catch (error) {
-      console.error('Erro ao buscar alunos:', error);
-      setStudentsList([]);
-      setShowStudentDropdown(false);
-    } finally {
-      setIsSearching(false);
-    }
+      setPdfProgress(Math.min(progress, 100));
+    }, 300);
   };
 
-  // Função para selecionar um aluno
-  const selectStudent = (student) => {
-    setSelectedStudent(student);
-    setFormData(prev => ({
-      ...prev,
-      studentName: student.nome_completo,
-      studentGrade: student.serie,
-      studentClass: student.turma
-    }));
-    setStudentSearch(student.nome_completo);
-    setShowStudentDropdown(false);
-    setStudentsList([]);
+  const addAdjustment = () => {
+    if (!newAdj.description || !newAdj.value || !selectedId) return;
+    setEmployees(prev => prev.map(e =>
+      e.id === selectedId
+        ? { ...e, adjustments: [...e.adjustments, { ...newAdj, value: parseFloat(newAdj.value) }] }
+        : e
+    ));
+    setNewAdj({ type: "add", description: "", value: "" });
   };
 
-  // Função para lidar com mudança no campo de busca
-  const handleStudentSearchChange = (e) => {
-    const value = e.target.value;
-    setStudentSearch(value);
-    searchStudents(value);
-    
-    if (!value) {
-      setSelectedStudent(null);
-      setFormData(prev => ({
-        ...prev,
-        studentName: '',
-        studentGrade: '',
-        studentClass: ''
-      }));
-      setShowStudentDropdown(false);
-    }
+  const removeAdjustment = (index) => {
+    setEmployees(prev => prev.map(e =>
+      e.id === selectedId
+        ? { ...e, adjustments: e.adjustments.filter((_, i) => i !== index) }
+        : e
+    ));
   };
 
-  // Refazer busca quando filtros mudarem
-  const handleFilterChange = () => {
-    if (studentSearch.length >= 2) {
-      searchStudents(studentSearch);
-    }
+  const validateEmployee = () => {
+    setEmployees(prev => prev.map(e =>
+      e.id === selectedId ? { ...e, status: "reviewed" } : e
+    ));
+    const currentIndex = filteredEmployees.findIndex(e => e.id === selectedId);
+    const next = filteredEmployees[currentIndex + 1];
+    if (next) setSelectedId(next.id);
   };
 
-  // Limpar seleção de aluno
-  const clearStudentSelection = () => {
-    setSelectedStudent(null);
-    setStudentSearch('');
-    setFormData(prev => ({
-      ...prev,
-      studentName: '',
-      studentGrade: '',
-      studentClass: ''
-    }));
-    setShowStudentDropdown(false);
-    setStudentsList([]);
+  const unvalidateEmployee = () => {
+    setEmployees(prev => prev.map(e =>
+      e.id === selectedId ? { ...e, status: "pending" } : e
+    ));
   };
 
-  // Limpar filtros
-  const clearFilters = () => {
-    setSelectedTurno('Manhã'); // Mantém "Manhã" fixo
-    setSelectedSerie('');
-    if (studentSearch.length >= 2) {
-      searchStudents(studentSearch);
-    }
+  const getTotal = (emp) => {
+    if (!emp) return 0;
+    const base = emp.extractedValue || emp.baseSalary;
+    const adds = emp.adjustments.filter(a => a.type === "add").reduce((s, a) => s + a.value, 0);
+    const subs = emp.adjustments.filter(a => a.type === "sub").reduce((s, a) => s + a.value, 0);
+    return base + adds - subs;
   };
 
-  const calculatePrice = () => {
-    const PRECO_BASE = 30.0;
-    let valorTotal = PRECO_BASE * ticketQuantity;
-    
-    if (formData.paymentMethod === 'credit') {
-      let taxaPercentual = 0;
-      const taxaFixa = 0.49;
-      const parcelas = parseInt(formData.installments) || 1;
-      
-      if (parcelas === 1) {
-        taxaPercentual = 0.0299;
-      } else if (parcelas >= 2 && parcelas <= 4) {
-        taxaPercentual = 0.0349;
-      } else {
-        taxaPercentual = 0.0399;
-      }
-      
-      valorTotal = valorTotal + (valorTotal * taxaPercentual) + taxaFixa;
-    }
-    
-    const valorParcela = valorTotal / (parseInt(formData.installments) || 1);
-    return { valorTotal, valorParcela };
-  };
-
-  const increaseTickets = () => {
-    if (ticketQuantity < 20) {
-      setTicketQuantity(prev => prev + 1);
-    }
-  };
-
-  const decreaseTickets = () => {
-    if (ticketQuantity > 1) {
-      setTicketQuantity(prev => prev - 1);
-    }
-  };
-
-  const { valorTotal, valorParcela } = calculatePrice();
-
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    
-    if (name === 'cpf') {
-      const cpfValue = value
-        .replace(/\D/g, '')
-        .replace(/(\d{3})(\d)/, '$1.$2')
-        .replace(/(\d{3})(\d)/, '$1.$2')
-        .replace(/(\d{3})(\d{1,2})$/, '$1-$2');
-
-      setFormData(prev => ({ ...prev, [name]: cpfValue }));
-      
-      const cpfSemMascara = cpfValue.replace(/[^\d]/g, '');
-      
-      if (cpfSemMascara.length === 0) {
-        setCpfError('');
-        setCpfValid(false);
-      } else if (cpfSemMascara.length < 11) {
-        setCpfError('CPF deve ter 11 dígitos');
-        setCpfValid(false);
-      } else if (cpfSemMascara.length === 11) {
-        if (validarCPF(cpfSemMascara)) {
-          setCpfError('');
-          setCpfValid(true);
-        } else {
-          setCpfError('CPF inválido. Verifique os números digitados.');
-          setCpfValid(false);
-        }
-      }
-    } else {
-      setFormData(prev => ({ ...prev, [name]: value }));
-    }
-  };
-
-  const validateForm = () => {
-    if (!selectedStudent) {
-      alert('Por favor, selecione um aluno da lista.');
-      return false;
-    }
-
-    const cpfSemMascara = formData.cpf.replace(/[^\d]/g, '');
-    
-    if (!cpfSemMascara || cpfSemMascara.length !== 11) {
-      alert('Por favor, preencha um CPF válido.');
-      return false;
-    }
-    
-    if (!validarCPF(cpfSemMascara)) {
-      alert('CPF inválido. Verifique os números digitados.');
-      return false;
-    }
-    
-    return true;
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    
-    if (!validateForm()) {
-      return;
-    }
-    
-    setIsProcessing(true);
-
-    try {  
-      const response = await fetch('https://webhook.escolaamadeus.com/webhook/amadeuseventos', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          studentName: formData.studentName,
-          studentGrade: formData.studentGrade,
-          studentClass: formData.studentClass,
-          parentName: formData.parentName,
-          cpf: formData.cpf,
-          email: formData.email,
-          phone: formData.phone,
-          paymentMethod: formData.paymentMethod,
-          installments: formData.installments,
-          ticketQuantity: ticketQuantity, 
-          amount: valorTotal,
-          timestamp: new Date().toISOString(),
-          event: 'Amadeus-autonatalvespertino'
-        })
-      });
-
-      if (response.ok) {
-        const responseData = await response.json();
-        console.log('Resposta do n8n:', responseData);
-        
-        if (responseData.success === false) {
-          alert(responseData.message || 'Erro ao processar dados. Tente novamente.');
-          return;
-        }
-        
-        setInscriptionSuccess(true);
-  
+  const handleSendAll = () => {
+    setSendingEmails(true);
+    setEmailsSent(0);
+    const reviewed = employees.filter(e => e.status === "reviewed");
+    let count = 0;
+    const interval = setInterval(() => {
+      count++;
+      setEmailsSent(count);
+      if (count >= reviewed.length) {
+        clearInterval(interval);
         setTimeout(() => {
-          if (responseData.paymentUrl) {
-            window.location.href = responseData.paymentUrl;
-          } else {
-            console.log('Link de pagamento não encontrado na resposta');
-            alert('Erro: Link de pagamento não encontrado. Entre em contato conosco.');
-          }
-        }, 1000);
-      } else {
-        const errorData = await response.json();
-        alert(errorData.message || 'Erro ao enviar dados para o servidor');
+          setEmployees(prev => prev.map(e =>
+            e.status === "reviewed" ? { ...e, status: "sent" } : e
+          ));
+          setSendingEmails(false);
+          setShowSendModal(false);
+        }, 600);
       }
-    } catch (error) {
-      console.error('Erro:', error);
-      alert('Erro ao processar inscrição. Tente novamente.');
-    } finally {
-      setIsProcessing(false);
-    }
+    }, 400);
   };
 
-  if (inscriptionSuccess) {
-    return (
-      <div className="min-h-screen bg-green-50 flex items-center justify-center p-4">
-        <Card className="w-full max-w-md">
-          <CardHeader className="text-center">
-            <div className="mx-auto mb-4 p-3 bg-green-100 rounded-full w-fit">
-              <CheckCircle className="h-8 w-8 text-green-600" />
-            </div>
-            <CardTitle className="text-green-600">Aguarde!</CardTitle>
-            <CardDescription>Redirecionando para o pagamento...</CardDescription>
-          </CardHeader>
-          <CardContent className="text-center">
-            <p className="text-sm text-muted-foreground mb-6">
-              Seus dados foram registrados com sucesso. Em instantes você será redirecionado para finalizar o pagamento.
-            </p>
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600 mx-auto mb-4"></div>
-            <Button onClick={() => window.location.reload()} variant="outline" className="w-full">
-              Voltar ao Início
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
+  const filteredEmployees = employees.filter(e => {
+    const matchesSearch = e.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      e.role.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesFilter = filterStatus === "all" || e.status === filterStatus;
+    return matchesSearch && matchesFilter;
+  });
+
+  const stats = {
+    total: employees.length,
+    pending: employees.filter(e => e.status === "pending").length,
+    reviewed: employees.filter(e => e.status === "reviewed").length,
+    sent: employees.filter(e => e.status === "sent").length,
+  };
 
   return (
-    <div className="min-h-screen smooth-scroll">
-      <header className="fixed top-0 w-full bg-white/95 backdrop-blur-sm z-50 border-b">
-        <nav className="container mx-auto px-4 py-4">
-          <div className="flex justify-between items-center">
-            <h1 className="text-xl font-bold text-blue-900">Escola Amadeus</h1>
-            <div className="hidden md:flex space-x-6">
-              <button onClick={() => scrollToSection('sobre')} className="text-sm hover:text-primary transition-colors">Sobre</button>
-              <button onClick={() => scrollToSection('Programação do Evento')} className="text-sm hover:text-primary transition-colors">Programação do Evento</button>
-              <button onClick={() => scrollToSection('custos')} className="text-sm hover:text-primary transition-colors">Custos</button>
-              <button onClick={() => scrollToSection('Observação')} className="text-sm hover:text-primary transition-colors">Observação</button>
-              <button onClick={() => scrollToSection('orientacoes')} className="text-sm hover:text-primary transition-colors">Orientações</button>
-              <button onClick={() => scrollToSection('contato')} className="text-sm hover:text-primary transition-colors">Contato</button>
+    <div style={{
+      minHeight: "100vh",
+      background: "#F8F7F4",
+      fontFamily: "'Outfit', 'Segoe UI', sans-serif",
+      color: "#1a1a1a",
+    }}>
+      <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+      {/* HEADER */}
+      <header style={{
+        background: "#1B2A4A",
+        color: "#fff",
+        padding: "0 32px",
+        height: 64,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        position: "sticky",
+        top: 0,
+        zIndex: 100,
+        boxShadow: "0 2px 12px rgba(27,42,74,0.15)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{
+            width: 36, height: 36, borderRadius: 10,
+            background: "linear-gradient(135deg, #F59E0B, #EF4444)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 18, fontWeight: 800,
+          }}>₵</div>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: -0.3 }}>ContraCheque</div>
+            <div style={{ fontSize: 10, opacity: 0.6, letterSpacing: 1, textTransform: "uppercase" }}>
+              Sistema de Folha de Pagamento
             </div>
           </div>
-        </nav>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <span style={{
+            fontSize: 13, background: "rgba(255,255,255,0.12)",
+            padding: "6px 14px", borderRadius: 8, fontWeight: 500,
+            textTransform: "capitalize",
+          }}>
+            📅 {currentMonth}
+          </span>
+        </div>
       </header>
 
-      <section className="hero-section min-h-screen flex items-center justify-center text-white relative">
-        <div className="text-center z-10 max-w-4xl mx-auto px-4">
-          <h1 className="text-5xl md:text-7xl font-bold mb-6 animate-fade-in">
-            Auto de Natal
-          </h1>
-          <p className="text-xl md:text-2xl mb-8 opacity-90">
-            ESTE COMUNICADO É SOMENTE PARA OS ALUNOS DO TURNO VESPERTINO.
-          </p>
-          <div className="flex flex-col sm:flex-row gap-4 justify-center">
-            <Button 
-              size="lg" 
-              variant="outline" 
-              className="border-white text-white hover:bg-white hover:text-primary px-8 py-3 bg-white text-primary"
-              onClick={() => scrollToSection("sobre")}
-            >
-              Saiba Mais
-            </Button>
-          </div>
-          <div className="mt-12 flex justify-center items-center space-x-8 text-sm">
-            <div className="flex items-center">
-              <Calendar className="h-5 w-5 mr-2" />
-              6 de Dezembro de 2025 - Às 16:00.
-            </div>
-            <div className="flex items-center">
-              <MapPin className="h-5 w-5 mr-2" />
-              Teatro Poti Cavalcanti - São Gonçalo do Amarante
-            </div>
-          </div>
-        </div>
-      </section>
+      <div style={{ display: "flex", height: "calc(100vh - 64px)" }}>
 
-      <section id="sobre" className="section-padding bg-white">
-        <div className="container mx-auto max-w-6xl">
-          <div className="text-center mb-16">
-            <h2 className="text-4xl font-bold mb-4 gradient-text">Sobre o Evento</h2>
-            <p className="text-lg text-muted-foreground max-w-3xl mx-auto">
-            O Auto de Natal é uma apresentação teatral que conta a história do nascimento de Jesus 
-            de forma lúdica e emocionante. É uma tradição que mistura teatro, música e a magia do 
-            Natal, onde as crianças dão vida aos personagens dessa história tão especial. Este ano, 
-            nossos alunos prepararam um espetáculo lindo no Teatro Poti Cavalcanti para celebrar o 
-            encerramento do ano letivo. 
-            </p>
-          </div>
-
-          <div className="grid md:grid-cols-2 gap-12 items-center">
-            <div>
-              <h3 className="text-2xl font-semibold mb-6">Uma Experiência Única</h3>
-              <div className="space-y-4">
-                <div className="flex items-start space-x-3">
-                  <CheckCircle className="h-6 w-6 text-accent mt-1 flex-shrink-0" />
-                  <p>Espaço com segurança e comodidade</p>
+        {/* LEFT PANEL */}
+        <div style={{
+          width: 380, borderRight: "1px solid #E5E2DB",
+          display: "flex", flexDirection: "column",
+          background: "#FFFFFF",
+        }}>
+          {/* PDF Upload Area */}
+          <div style={{ padding: 20, borderBottom: "1px solid #E5E2DB" }}>
+            {!pdfUploaded && !pdfProcessing ? (
+              <button onClick={handlePdfUpload} style={{
+                width: "100%", padding: 20, borderRadius: 12,
+                border: "2px dashed #CBD5E1",
+                background: "#F8FAFC",
+                cursor: "pointer",
+                display: "flex", flexDirection: "column",
+                alignItems: "center", gap: 8,
+                transition: "all 0.2s",
+              }}
+              onMouseOver={e => { e.currentTarget.style.borderColor = "#F59E0B"; e.currentTarget.style.background = "#FFFBEB"; }}
+              onMouseOut={e => { e.currentTarget.style.borderColor = "#CBD5E1"; e.currentTarget.style.background = "#F8FAFC"; }}
+              >
+                <span style={{ fontSize: 28 }}>📄</span>
+                <span style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A" }}>
+                  Upload do PDF de Contracheques
+                </span>
+                <span style={{ fontSize: 11, color: "#94A3B8" }}>
+                  Clique para selecionar o arquivo
+                </span>
+              </button>
+            ) : pdfProcessing ? (
+              <div style={{
+                padding: 20, borderRadius: 12,
+                background: "#FFFBEB", border: "1px solid #FCD34D",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                  <span style={{ fontSize: 18, animation: "spin 1s linear infinite" }}>⚙️</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "#92400E" }}>
+                    Processando PDF com IA...
+                  </span>
                 </div>
-                <div className="flex items-start space-x-3">
-                  <CheckCircle className="h-6 w-6 text-accent mt-1 flex-shrink-0" />
-                  <p>Espaço cultural no centro de São Gonçalo do Amarante</p>
+                <div style={{
+                  height: 6, borderRadius: 3, background: "#FEF3C7", overflow: "hidden",
+                }}>
+                  <div style={{
+                    height: "100%", borderRadius: 3,
+                    background: "linear-gradient(90deg, #F59E0B, #EF4444)",
+                    width: `${pdfProgress}%`,
+                    transition: "width 0.3s ease",
+                  }} />
                 </div>
-                <div className="flex items-start space-x-3">
-                  <CheckCircle className="h-6 w-6 text-accent mt-1 flex-shrink-0" />
-                  <p>Fechando o ano letivo com arte e emoção</p>
-                </div>
-                <div className="flex items-start space-x-3">
-                  <CheckCircle className="h-6 w-6 text-accent mt-1 flex-shrink-0" />
-                  <p>Espaço preparado para receber as famílias dos apresentadores</p>
+                <div style={{ fontSize: 11, color: "#B45309", marginTop: 6 }}>
+                  Separando páginas e identificando colaboradores...
                 </div>
               </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <img src={interiorImage1} alt="Interior do Instituto" className="rounded-lg shadow-lg h-48 w-full object-cover" />
-              <img src={interiorImage2} alt="Coleções do Instituto" className="rounded-lg shadow-lg h-48 w-full object-cover" />
-              <img src={jardimImage} alt="Jardins do Instituto" className="rounded-lg shadow-lg col-span-2 h-64 w-full object-cover" />
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section id="itinerario" className="section-padding bg-muted/30">
-        <div className="container mx-auto max-w-6xl">
-          <div className="text-center mb-16">
-            <h2 className="text-4xl font-bold mb-4">Sobre o evento</h2>
-            <p className="text-lg text-muted-foreground">
-              Confira as informações do nosso evento
-            </p>
-          </div>
-          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
-            <Card className="card-hover">
-              <CardHeader className="text-center">
-                <div className="mx-auto mb-4 p-3 bg-primary/10 rounded-full w-fit">
-                  <Clock className="h-8 w-8 text-primary" />
-                </div>
-                <CardTitle>Data e Horário</CardTitle>
-                <CardDescription>Horário</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-center">
-                  Entrada: 16:00
-                </p>
-                <p className="text-sm text-center">
-                  Início das apresentações: 16:30
-                </p>
-              </CardContent>
-            </Card>
-            <Card className="card-hover">
-              <CardHeader className="text-center">
-                <div className="mx-auto mb-4 p-3 bg-accent/10 rounded-full w-fit">
-                  <MapPin className="h-8 w-8 text-accent" />
-                </div>
-                <CardTitle>Local</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-center">
-                  Teatro Poti Cavalcanti – Rua Alexandre Cavalcanti, s/n – Centro – São Gonçalo do Amarante/RN
-                </p>
-              </CardContent>
-            </Card>
-          </div>
-        </div>
-      </section>
-
-      <section id="documentacao" className="section-padding bg-muted/30">
-        <div className="container mx-auto max-w-4xl">
-          <div className="text-center mb-16">
-            <h2 className="text-4xl font-bold mb-4">IMPORTANTE - LEIA</h2>
-          </div>
-
-          <div className="mt-8 p-6 bg-accent/10 rounded-lg border border-accent/20">
-            <div className="space-y-4">
-              <div className="flex items-start space-x-3">
-                <div className="w-2 h-2 bg-accent rounded-full mt-2 flex-shrink-0"></div>
+            ) : (
+              <div style={{
+                padding: 14, borderRadius: 12,
+                background: "#F0FDF4", border: "1px solid #BBF7D0",
+                display: "flex", alignItems: "center", gap: 10,
+              }}>
+                <span style={{
+                  width: 32, height: 32, borderRadius: 8,
+                  background: "#22C55E", color: "#fff",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 16, fontWeight: 700,
+                }}>✓</span>
                 <div>
-                  <p className="text-sm">
-                  É necessário a confirmação do(a) aluno(a) para a participação no Auto de Natal. 
-                  </p>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#065F46" }}>
+                    PDF processado com sucesso
+                  </div>
+                  <div style={{ fontSize: 11, color: "#059669" }}>
+                    {employees.length} contracheques extraídos
+                  </div>
+                </div>
+                <button onClick={() => { setPdfUploaded(false); setEmployees(prev => prev.map(e => ({ ...e, paycheckExtracted: false, extractedValue: null, status: "pending", adjustments: [] }))); }}
+                  style={{
+                    marginLeft: "auto", background: "none", border: "none",
+                    color: "#6B7280", cursor: "pointer", fontSize: 12, textDecoration: "underline",
+                  }}>
+                  Reenviar
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Stats */}
+          <div style={{
+            display: "grid", gridTemplateColumns: "repeat(3, 1fr)",
+            gap: 8, padding: "12px 20px",
+            borderBottom: "1px solid #E5E2DB",
+          }}>
+            {[
+              { label: "Pendentes", value: stats.pending, color: "#F59E0B" },
+              { label: "Validados", value: stats.reviewed, color: "#22C55E" },
+              { label: "Enviados", value: stats.sent, color: "#3B82F6" },
+            ].map(s => (
+              <div key={s.label} style={{
+                textAlign: "center", padding: "8px 4px", borderRadius: 8,
+                background: "#F8F7F4",
+              }}>
+                <div style={{
+                  fontSize: 22, fontWeight: 800, color: s.color,
+                  fontFamily: "'JetBrains Mono', monospace",
+                }}>{s.value}</div>
+                <div style={{ fontSize: 10, color: "#6B7280", fontWeight: 500, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  {s.label}
                 </div>
               </div>
-              <div className="flex items-start space-x-3">
-                <div className="w-2 h-2 bg-accent rounded-full mt-2 flex-shrink-0"></div>
-                <div>
-                  <p className="text-sm">
-                    Só irá participar dos ensaios  o(a) aluno(a) que o responsável confirmar sua presença.
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-start space-x-3">
-                <div className="w-2 h-2 bg-accent rounded-full mt-2 flex-shrink-0"></div>
-                <div>
-                  <p className="text-sm">
-                   O aluno que irá APRESENTAR não paga, no entanto para CADA responsável, que tiver interesse de assistir, O INGRESSO será de R$ 30,00. 
-                  </p>
-                </div>
-              </div>    
-              <div className="flex items-start space-x-3">
-                <div className="w-2 h-2 bg-accent rounded-full mt-2 flex-shrink-0"></div>
-                <div>
-                  <p className="text-sm">
-                   A confirmação do aluno deve ser feita até 11 de novembro de 2025, diretamente com a professora. 
-                  </p>
-                </div>
-              </div>  
+            ))}
+          </div>
+
+          {/* Search & Filter */}
+          <div style={{ padding: "12px 20px", borderBottom: "1px solid #E5E2DB" }}>
+            <input
+              type="text"
+              placeholder="Buscar colaborador..."
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              style={{
+                width: "100%", padding: "8px 12px", borderRadius: 8,
+                border: "1px solid #E5E2DB", fontSize: 13,
+                background: "#F8F7F4", outline: "none",
+                boxSizing: "border-box",
+              }}
+              onFocus={e => e.target.style.borderColor = "#F59E0B"}
+              onBlur={e => e.target.style.borderColor = "#E5E2DB"}
+            />
+            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+              {[
+                { key: "all", label: "Todos" },
+                { key: "pending", label: "Pendentes" },
+                { key: "reviewed", label: "Validados" },
+                { key: "sent", label: "Enviados" },
+              ].map(f => (
+                <button key={f.key} onClick={() => setFilterStatus(f.key)} style={{
+                  padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: 500,
+                  border: "1px solid",
+                  borderColor: filterStatus === f.key ? "#1B2A4A" : "#E5E2DB",
+                  background: filterStatus === f.key ? "#1B2A4A" : "transparent",
+                  color: filterStatus === f.key ? "#fff" : "#6B7280",
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                }}>
+                  {f.label}
+                </button>
+              ))}
             </div>
           </div>
-        </div>
-      </section>
 
-      <section id="custos" className="section-padding bg-white">
-        <div className="container mx-auto max-w-4xl">
-          <div className="text-center mb-16">
-            <h2 className="text-4xl font-bold mb-4">Inscrição e Taxa</h2>
-            <p className="text-lg text-muted-foreground">
-              O aluno que irá APRESENTAR não paga, no entanto para CADA responsável, que tiver interesse de assistir, O INGRESSO será de R$ 30,00. 
-            </p>
-          </div>
-
-          <Card className="mb-8">
-            <CardHeader className="text-center">
-              <CardTitle className="text-3xl text-primary">R$ 30,00</CardTitle>
-              <CardDescription>por RESPONSÁVEL</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid md:grid-cols-2 gap-6">
-                <div>
-                  <h4 className="font-semibold mb-3 text-accent">O que está incluído:</h4>
-                  <ul className="space-y-2 text-sm">
-                    <li className="flex items-center">
-                      <CheckCircle className="h-4 w-4 text-accent mr-2" />
-                      Bombeiros, decoração, som e iluminação.
-                    </li>
-                    <li className="flex items-center">
-                      <CheckCircle className="h-4 w-4 text-accent mr-2" />
-                      Entrada no teatro.
-                    </li>
-                  </ul>
+          {/* Employee List */}
+          <div style={{ flex: 1, overflowY: "auto" }}>
+            {filteredEmployees.map(emp => (
+              <div
+                key={emp.id}
+                onClick={() => setSelectedId(emp.id)}
+                style={{
+                  padding: "14px 20px",
+                  borderBottom: "1px solid #F3F0EB",
+                  cursor: "pointer",
+                  background: selectedId === emp.id ? "#FEF9EE" : "transparent",
+                  borderLeft: selectedId === emp.id ? "3px solid #F59E0B" : "3px solid transparent",
+                  transition: "all 0.15s",
+                }}
+                onMouseOver={e => { if (selectedId !== emp.id) e.currentTarget.style.background = "#FAFAF8"; }}
+                onMouseOut={e => { if (selectedId !== emp.id) e.currentTarget.style.background = "transparent"; }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A", marginBottom: 2 }}>
+                      {emp.name}
+                    </div>
+                    <div style={{ fontSize: 11, color: "#6B7280" }}>{emp.role}</div>
+                  </div>
+                  <StatusBadge status={emp.status} />
                 </div>
-                <div>
-                  <h4 className="font-semibold mb-3 text-destructive">Informações importantes:</h4>
-                  <ul className="space-y-2 text-sm">
-                    <li className="flex items-start">
-                      <Shield className="h-4 w-4 text-destructive mr-2 mt-0.5" />
-                      Pagamento obrigatório até 03 de Dezembro de 2025;
-                    </li>
-                    <li className="flex items-start">
-                      <Shield className="h-4 w-4 text-destructive mr-2 mt-0.5" />
-                      O valor pago não poderá ser reembolsado. 
-                    </li>
-                  </ul>
-                </div>
-              </div>
-              
-              <Separator className="my-6" />
-              
-              <div className="text-center">
-                {!showForm ? (
-                  <Button 
-                    size="lg" 
-                    className="bg-orange-600 hover:bg-orange-700 px-8 py-3"
-                    onClick={showInscricaoForm}
-                  >
-                    Realizar Inscrição e Pagamento
-                    <ArrowRight className="ml-2 h-5 w-5" />
-                  </Button>
-                ) : (
-                  <Button 
-                    size="lg" 
-                    variant="outline"
-                    className="px-8 py-3"
-                    onClick={() => setShowForm(false)}
-                  >
-                    <X className="mr-2 h-4 w-4" />
-                    Fechar Formulário
-                  </Button>
+                {emp.paycheckExtracted && (
+                  <div style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    marginTop: 8,
+                  }}>
+                    <span style={{
+                      fontSize: 13, fontWeight: 700,
+                      fontFamily: "'JetBrains Mono', monospace",
+                      color: "#1B2A4A",
+                    }}>
+                      {formatCurrency(getTotal(emp))}
+                    </span>
+                    {emp.adjustments.length > 0 && (
+                      <span style={{
+                        fontSize: 10, color: "#F59E0B", fontWeight: 600,
+                        background: "#FEF3C7", padding: "2px 6px", borderRadius: 4,
+                      }}>
+                        {emp.adjustments.length} ajuste{emp.adjustments.length > 1 ? "s" : ""}
+                      </span>
+                    )}
+                  </div>
                 )}
-                <p className="text-xs text-muted-foreground mt-2">
-                  {!showForm ? 'Preencha seus dados e escolha a forma de pagamento' : 'Clique acima para fechar o formulário'}
-                </p>
               </div>
-            </CardContent>
-          </Card>
+            ))}
+          </div>
 
-          {/* FORMULÁRIO - FILTRO AUTOMÁTICO (SEM CAIXINHA VISÍVEL) */}
-          {showForm && (
-            <Card id="formulario-inscricao" className="border-orange-200 bg-orange-50/30">
-              <CardHeader>
-                <CardTitle className="flex items-center text-orange-800">
-                  <User className="mr-2 h-5 w-5" />
-                  Formulário de Inscrição
-                </CardTitle>
-                <CardDescription>
-                  Preencha todos os dados para garantir sua participação
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <form onSubmit={handleSubmit} className="space-y-6">
-                  
-                  {/* BUSCA DE ALUNO (FILTRO AUTOMÁTICO: SÓ TURNO MANHÃ) */}
-                  <div>
-                    <h3 className="text-lg font-semibold mb-4 flex items-center">
-                      <Search className="mr-2 h-5 w-5" />
-                      Buscar Aluno
-                    </h3>
-
-                    {/* CAIXINHA DE FILTROS COMENTADA - NÃO APARECE NA TELA
-                    <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                      <div className="flex items-center justify-between mb-3">
-                        <Label className="text-sm font-medium flex items-center">
-                          <Filter className="h-4 w-4 mr-2" />
-                          Filtrar busca por:
-                        </Label>
-                        {(selectedTurno || selectedSerie) && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            onClick={clearFilters}
-                            className="text-xs text-blue-600 hover:text-blue-800"
-                          >
-                            <X className="h-3 w-3 mr-1" />
-                            Limpar filtros
-                          </Button>
-                        )}
-                      </div>
-                    
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <div>
-                          <Label htmlFor="filterTurno" className="text-xs">Turno</Label>
-                          <select
-                            id="filterTurno"
-                            value={selectedTurno}
-                            onChange={(e) => {
-                              setSelectedTurno(e.target.value);
-                              setTimeout(handleFilterChange, 100);
-                            }}
-                            className="w-full h-9 px-3 rounded-md border border-input bg-white text-sm"
-                          >
-                            <option value="">Todos os Turnos</option>
-                            {TURNOS_DISPONIVEIS.map(turno => (
-                              <option key={turno} value={turno}>{turno}</option>
-                            ))}
-                          </select>
-                        </div>
-                        
-                        <div>
-                          <Label htmlFor="filterSerie" className="text-xs">Série</Label>
-                          <select
-                            id="filterSerie"
-                            value={selectedSerie}
-                            onChange={(e) => {
-                              setSelectedSerie(e.target.value);
-                              setTimeout(handleFilterChange, 100);
-                            }}
-                            className="w-full h-9 px-3 rounded-md border border-input bg-white text-sm"
-                          >
-                            <option value="">Todas as Séries</option>
-                            {SERIES_DISPONIVEIS.map(serie => (
-                              <option key={serie} value={serie}>{serie}</option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-
-                      {(selectedTurno || selectedSerie) && (
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {selectedTurno && (
-                            <Badge variant="secondary" className="text-xs">
-                              Turno: {selectedTurno}
-                            </Badge>
-                          )}
-                          {selectedSerie && (
-                            <Badge variant="secondary" className="text-xs">
-                              Série: {selectedSerie}
-                            </Badge>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                    FIM DA CAIXINHA DE FILTROS */}
-                    
-                    <div className="space-y-4">
-                      <div className="relative">
-                        <Label htmlFor="studentSearch">Digite o nome do aluno *</Label>
-                        <Input
-                          id="studentSearch"
-                          name="studentSearch"
-                          value={studentSearch}
-                          onChange={handleStudentSearchChange}
-                          onFocus={() => studentsList.length > 0 && setShowStudentDropdown(true)}
-                          required
-                          placeholder="Digite pelo menos 2 letras para buscar..."
-                          autoComplete="off"
-                          className={selectedStudent ? 'border-green-500 bg-green-50' : ''}
-                        />
-                        
-                        {isSearching && (
-                          <div className="absolute right-3 top-9">
-                            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
-                          </div>
-                        )}
-                        
-                        {selectedStudent && (
-                          <div className="mt-2 p-3 bg-green-100 rounded border border-green-300 flex items-center justify-between">
-                            <div>
-                              <span className="text-sm text-green-800 font-medium block">
-                                ✓ Aluno selecionado: {selectedStudent.nome_completo}
-                              </span>
-                              <span className="text-xs text-green-700">
-                                {selectedStudent.serie} - Turma {selectedStudent.turma} - Turno: {selectedStudent.turno}
-                              </span>
-                            </div>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              onClick={clearStudentSelection}
-                              className="h-8 text-red-600 hover:text-red-800 hover:bg-red-50"
-                            >
-                              <X className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        )}
-
-                        {/* Dropdown de resultados */}
-                        {showStudentDropdown && studentsList.length > 0 && !selectedStudent && (
-                          <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-auto">
-                            {studentsList.map((student) => (
-                              <div
-                                key={student.id}
-                                onClick={() => selectStudent(student)}
-                                className="p-3 hover:bg-blue-50 cursor-pointer border-b border-gray-100 last:border-b-0 transition-colors"
-                              >
-                                <div className="font-medium text-sm">{student.nome_completo}</div>
-                                <div className="text-xs text-gray-600 mt-1">
-                                  {student.serie} - Turma {student.turma} - {student.turno}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        {studentSearch.length >= 2 && studentsList.length === 0 && !selectedStudent && !isSearching && (
-                          <div className="mt-2 p-3 bg-yellow-50 rounded border border-yellow-200">
-                            <p className="text-sm text-yellow-800 flex items-center">
-                              <AlertTriangle className="h-4 w-4 mr-2" />
-                              Nenhum aluno encontrado. Verifique o nome digitado.
-                            </p>
-                          </div>
-                        )}
-
-                        {studentSearch.length < 2 && studentSearch.length > 0 && (
-                          <p className="text-xs text-gray-500 mt-1">
-                            Digite pelo menos 2 letras para buscar
-                          </p>
-                        )}
-                      </div>
-
-                      {/* Campos desabilitados preenchidos automaticamente */}
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <Label htmlFor="studentGrade">Série do Aluno *</Label>
-                          <Input
-                            id="studentGrade"
-                            name="studentGrade"
-                            value={formData.studentGrade}
-                            disabled
-                            className="bg-gray-100 cursor-not-allowed"
-                            placeholder="Será preenchido automaticamente"
-                          />
-                        </div>
-                        <div>
-                          <Label htmlFor="studentClass">Turma do Aluno *</Label>
-                          <Input
-                            id="studentClass"
-                            name="studentClass"
-                            value={formData.studentClass}
-                            disabled
-                            className="bg-gray-100 cursor-not-allowed"
-                            placeholder="Será preenchido automaticamente"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Dados do Responsável */}
-                  <div>
-                    <h3 className="text-lg font-semibold mb-4 flex items-center">
-                      <Mail className="mr-2 h-5 w-5" />
-                      Dados do Responsável
-                    </h3>
-                    <div className="space-y-4">
-                      <div>
-                        <Label htmlFor="parentName">Nome do Responsável *</Label>
-                        <Input
-                          id="parentName"
-                          name="parentName"
-                          value={formData.parentName}
-                          onChange={handleInputChange}
-                          required
-                          placeholder="Nome completo do responsável"
-                        />
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                          <Label htmlFor="phone">Telefone/WhatsApp *</Label>
-                          <Input
-                            id="phone"
-                            name="phone"
-                            value={formData.phone}
-                            onChange={handleInputChange}
-                            required
-                            placeholder="(84) 99999-9999"
-                          />
-                        </div>
-                        <div>
-                          <Label htmlFor="email">E-mail *</Label>
-                          <Input
-                            id="email"
-                            name="email"
-                            type="email"
-                            value={formData.email}
-                            onChange={handleInputChange}
-                            required
-                            placeholder="seu@email.com"
-                          />
-                        </div>
-                        <div>
-                          <Label htmlFor="cpf">CPF do Responsável *</Label>
-                          <Input
-                            id="cpf"
-                            name="cpf"
-                            value={formData.cpf}
-                            onChange={handleInputChange}
-                            required
-                            placeholder="000.000.000-00"
-                            maxLength="14"
-                            className={`${
-                              formData.cpf && cpfError 
-                                ? 'border-red-500 bg-red-50' 
-                                : formData.cpf && cpfValid 
-                                ? 'border-green-500 bg-green-50' 
-                                : ''
-                            }`}
-                          />
-                          {cpfError && (
-                            <p className="text-red-500 text-sm mt-1 flex items-center">
-                              <span className="mr-1">⚠️</span>
-                              {cpfError}
-                            </p>
-                          )}
-                          {cpfValid && !cpfError && (
-                            <p className="text-green-600 text-sm mt-1 flex items-center">
-                              <span className="mr-1">✅</span>
-                              CPF válido
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Quantidade de Ingressos */}
-                  <div>
-                    <h3 className="text-lg font-semibold mb-4 flex items-center">
-                      <Users className="mr-2 h-5 w-5" />
-                      Quantidade de Ingressos
-                    </h3>
-                    <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 mb-4">
-                      <p className="text-sm text-blue-800 mb-3">
-                        Cada ingresso custa R$ 30,00.
-                      </p>
-                      
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center space-x-4">
-                          <Label className="text-sm font-medium">Quantidade de ingressos:</Label>
-                          <div className="flex items-center space-x-2">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="h-8 w-8 p-0"
-                              onClick={decreaseTickets}
-                              disabled={ticketQuantity === 1}
-                            >
-                              <Minus className="h-4 w-4" />
-                            </Button>
-                            <span className="w-8 text-center font-semibold text-lg">
-                              {ticketQuantity}
-                            </span>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="h-8 w-8 p-0"
-                              onClick={increaseTickets}
-                              disabled={ticketQuantity === 20}
-                            >
-                              <Plus className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </div>
-                        
-                        <div className="text-sm">
-                          <span className="text-gray-600">Subtotal: </span>
-                          <span className="text-green-600 font-bold text-lg">
-                            R$ {(30 * ticketQuantity).toFixed(2).replace('.', ',')}
-                          </span>
-                        </div>
-                      </div>
-                      
-                      {ticketQuantity >= 3 && ticketQuantity < 6 && (
-                        <div className="mt-3 p-2 bg-green-100 rounded border border-green-300">
-                          <p className="text-xs text-green-800 font-medium flex items-center">
-                            <CheckCircle className="h-4 w-4 mr-1" />
-                            Para 3 ou mais ingressos você pode parcelar em até 2x no cartão!
-                          </p>
-                        </div>
-                      )}
-
-                      {ticketQuantity >= 6 && (
-                        <div className="mt-3 p-2 bg-blue-100 rounded border border-blue-300">
-                          <p className="text-xs text-blue-800 font-medium flex items-center">
-                            <CheckCircle className="h-4 w-4 mr-1" />
-                            🎉 Para 6 ou mais ingressos você pode parcelar em até 3x no cartão!
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Método de Pagamento */}
-                  <div>
-                    <h3 className="text-lg font-semibold mb-4">Método de Pagamento*</h3>
-                    
-                    <div className="space-y-3 mb-6">
-                      <div 
-                        className={`p-4 rounded-lg border-2 cursor-pointer transition-all ${
-                          formData.paymentMethod === 'pix' 
-                            ? 'border-orange-400 bg-orange-50' 
-                            : 'border-gray-200 hover:border-gray-300'
-                        }`}
-                        onClick={() => setFormData(prev => ({ ...prev, paymentMethod: 'pix', installments: 1 }))}
-                      >
-                        <div className="flex items-center">
-                          <div className={`w-4 h-4 rounded-full border-2 mr-3 ${
-                            formData.paymentMethod === 'pix' ? 'border-orange-400 bg-orange-400' : 'border-gray-300'
-                          }`}>
-                            {formData.paymentMethod === 'pix' && (
-                              <div className="w-full h-full rounded-full bg-orange-400"></div>
-                            )}
-                          </div>
-                          <div className="flex items-center space-x-2">
-                            <span className="text-lg font-bold">PIX</span>
-                            <span className="text-sm">
-                              R$ {(30 * ticketQuantity).toFixed(2).replace('.', ',')} (sem taxas)
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div 
-                        className={`p-4 rounded-lg border-2 cursor-pointer transition-all ${
-                          formData.paymentMethod === 'credit' 
-                            ? 'border-orange-400 bg-orange-50' 
-                            : 'border-gray-200 hover:border-gray-300'
-                        }`}
-                        onClick={() => setFormData(prev => ({ ...prev, paymentMethod: 'credit' }))}
-                      >
-                        <div className="flex items-center">
-                          <div className={`w-4 h-4 rounded-full border-2 mr-3 ${
-                            formData.paymentMethod === 'credit' ? 'border-orange-400 bg-orange-400' : 'border-gray-300'
-                          }`}>
-                            {formData.paymentMethod === 'credit' && (
-                              <div className="w-full h-full rounded-full bg-orange-400"></div>
-                            )}
-                          </div>
-                          <div>
-                            <div className="flex items-center space-x-2">
-                              <span className="text-sm">💳</span>
-                              <span className="text-sm font-medium">Cartão de Crédito</span>
-                            </div>
-                            {ticketQuantity >= 3 && ticketQuantity < 6 && (
-                              <div className="text-xs text-green-600 ml-6 font-medium">
-                                ✓ Parcele em até 2x sem juros
-                              </div>
-                            )}
-                            {ticketQuantity >= 6 && (
-                              <div className="text-xs text-blue-600 ml-6 font-medium">
-                                ✓ Parcele em até 3x sem juros
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {formData.paymentMethod === 'credit' && (
-                      <div className="mb-6">
-                        <Label className="text-sm font-medium">Número de Parcelas</Label>
-                        <select
-                          value={formData.installments}
-                          onChange={(e) => setFormData(prev => ({ ...prev, installments: parseInt(e.target.value) }))}
-                          className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm mt-2"
-                        >
-                          <option value={1}>1x de R$ {(valorTotal / 1).toFixed(2).replace('.', ',')}</option>
-                          {ticketQuantity >= 3 && (
-                            <option value={2}>2x de R$ {(valorTotal / 2).toFixed(2).replace('.', ',')}</option>
-                          )}
-                          {ticketQuantity >= 6 && (
-                            <option value={3}>3x de R$ {(valorTotal / 3).toFixed(2).replace('.', ',')}</option>
-                          )}
-                        </select>
-                        {ticketQuantity < 3 && (
-                          <p className="text-xs text-gray-500 mt-1">
-                            * Parcelamento disponível apenas para 3 ou mais ingressos
-                          </p>
-                        )}
-                        {ticketQuantity >= 3 && ticketQuantity < 6 && (
-                          <p className="text-xs text-gray-500 mt-1">
-                            * Parcelamento em 3x disponível para 6 ou mais ingressos
-                          </p>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Valor Total */}
-                    <div className="bg-orange-100 p-4 rounded-lg border border-orange-200">
-                      <div className="text-center">
-                        <h4 className="text-lg font-bold text-orange-800 mb-1">Valor Total</h4>
-                        <div className="text-sm text-gray-600 mb-1">
-                          {ticketQuantity} ingresso{ticketQuantity > 1 ? 's' : ''} × R$ 30,00
-                        </div>
-                        <div className="text-2xl font-bold text-orange-900">
-                          R$ {valorTotal.toFixed(2).replace('.', ',')}
-                        </div>
-                        {formData.paymentMethod === 'credit' && formData.installments > 1 && (
-                          <div className="text-sm text-orange-700 mt-1">
-                            {formData.installments}x de R$ {valorParcela.toFixed(2).replace('.', ',')}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Botão de Envio */}
-                  <Button 
-                    type="submit" 
-                    className="w-full bg-orange-600 hover:bg-orange-700 text-white py-6 text-lg font-bold"
-                    disabled={isProcessing || !selectedStudent}
-                  >
-                    {isProcessing ? (
-                      <>
-                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                        Processando Inscrição...
-                      </>
-                    ) : (
-                      'CONTINUAR PARA PAGAMENTO'
-                    )}
-                  </Button>
-
-                  <p className="text-xs text-center text-gray-600">
-                    Ao finalizar, você será redirecionado para o pagamento via Asaas
-                  </p>
-                </form>
-              </CardContent>
-            </Card>
+          {/* Send Button */}
+          {stats.reviewed > 0 && (
+            <div style={{ padding: 16, borderTop: "1px solid #E5E2DB" }}>
+              <button onClick={() => setShowSendModal(true)} style={{
+                width: "100%", padding: "12px 20px", borderRadius: 10,
+                background: "linear-gradient(135deg, #1B2A4A, #2D4A7A)",
+                color: "#fff", border: "none", cursor: "pointer",
+                fontSize: 14, fontWeight: 700,
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                boxShadow: "0 4px 12px rgba(27,42,74,0.3)",
+                transition: "transform 0.2s, box-shadow 0.2s",
+              }}
+              onMouseOver={e => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = "0 6px 16px rgba(27,42,74,0.4)"; }}
+              onMouseOut={e => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "0 4px 12px rgba(27,42,74,0.3)"; }}
+              >
+                📧 Enviar Lote ({stats.reviewed} contracheques)
+              </button>
+            </div>
           )}
         </div>
-      </section>
 
-      <section id="contato" className="section-padding bg-muted/30">
-        <div className="container mx-auto max-w-4xl">
-          <div className="text-center mb-16">
-            <h2 className="text-4xl font-bold mb-4">Entre em Contato</h2>
-            <p className="text-lg text-muted-foreground">
-              Tire suas dúvidas conosco
-            </p>
-          </div>
-
-          <div className="grid md:grid-cols-2 gap-8">
-            <Card className="card-hover">
-              <CardHeader>
-                <div className="flex items-center space-x-3">
-                  <Phone className="h-8 w-8 text-primary" />
-                  <div>
-                    <CardTitle>Telefone</CardTitle>
-                    <CardDescription>Secretaria da escola</CardDescription>
+        {/* RIGHT PANEL - Detail */}
+        <div style={{ flex: 1, overflowY: "auto", padding: 32 }}>
+          {!selected ? (
+            <div style={{
+              height: "100%", display: "flex", flexDirection: "column",
+              alignItems: "center", justifyContent: "center",
+              color: "#9CA3AF",
+            }}>
+              <span style={{ fontSize: 56, marginBottom: 16, opacity: 0.5 }}>📋</span>
+              <div style={{ fontSize: 18, fontWeight: 600, color: "#6B7280" }}>
+                Selecione um colaborador
+              </div>
+              <div style={{ fontSize: 13, marginTop: 4 }}>
+                {pdfUploaded
+                  ? "Clique em um nome na lista para revisar o contracheque"
+                  : "Faça upload do PDF para começar a validação"}
+              </div>
+            </div>
+          ) : (
+            <div style={{ maxWidth: 720, margin: "0 auto" }}>
+              {/* Employee Header */}
+              <div style={{
+                display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+                marginBottom: 28,
+              }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
+                    <h2 style={{ fontSize: 24, fontWeight: 800, color: "#1B2A4A", margin: 0 }}>
+                      {selected.name}
+                    </h2>
+                    <StatusBadge status={selected.status} />
+                  </div>
+                  <div style={{ fontSize: 14, color: "#6B7280" }}>{selected.role}</div>
+                  <div style={{ fontSize: 12, color: "#9CA3AF", marginTop: 2 }}>
+                    ✉️ {selected.email}
                   </div>
                 </div>
-              </CardHeader>
-              <CardContent>
-                <p className="text-lg font-semibold">(84) 9 8145-0229</p>
-                <p className="text-sm text-muted-foreground">
-                  Horário de atendimento: 7h às 19h
-                </p>
-              </CardContent>
-            </Card>
-          </div>
-          <div className="mt-8 text-center">
-            <p className="text-sm text-muted-foreground">
-              <strong>Coordenação Pedagógica</strong><br />
-              Escola Centro Educacional Amadeus - São Gonçalo do Amarante, RN
-            </p>
-          </div>
-        </div>
-      </section>
+              </div>
 
-      <footer className="bg-blue-900 text-white py-8">
-        <div className="container mx-auto px-4 text-center">
-          <p className="text-sm">
-            © 2025 Escola Centro Educacional Amadeus. Todos os direitos reservados.
-          </p>
-          <p className="text-xs mt-2 opacity-80">
-            Auto de Natal - Teatro Poti Cavalcanti - 6 de Dezembro de 2025
-          </p>
+              {/* Paycheck Card */}
+              <div style={{
+                background: "#fff", borderRadius: 16, padding: 24,
+                border: "1px solid #E5E2DB",
+                boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+                marginBottom: 20,
+              }}>
+                <div style={{
+                  fontSize: 11, fontWeight: 600, textTransform: "uppercase",
+                  letterSpacing: 1, color: "#9CA3AF", marginBottom: 16,
+                }}>
+                  Contracheque — {currentMonth}
+                </div>
+
+                {selected.paycheckExtracted ? (
+                  <>
+                    {/* Base Value */}
+                    <div style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                      padding: "12px 0",
+                      borderBottom: "1px solid #F3F0EB",
+                    }}>
+                      <span style={{ fontSize: 14, color: "#374151" }}>Valor do Contracheque (PDF)</span>
+                      <span style={{
+                        fontSize: 18, fontWeight: 700,
+                        fontFamily: "'JetBrains Mono', monospace",
+                        color: "#1B2A4A",
+                      }}>
+                        {formatCurrency(selected.extractedValue || selected.baseSalary)}
+                      </span>
+                    </div>
+
+                    {/* Adjustments List */}
+                    {selected.adjustments.length > 0 && (
+                      <div style={{ marginTop: 16 }}>
+                        <div style={{
+                          fontSize: 11, fontWeight: 600, textTransform: "uppercase",
+                          letterSpacing: 1, color: "#9CA3AF", marginBottom: 10,
+                        }}>
+                          Ajustes
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {selected.adjustments.map((adj, i) => (
+                            <AdjustmentRow
+                              key={i}
+                              adj={adj}
+                              index={i}
+                              onRemove={selected.status !== "sent" ? removeAdjustment : () => {}}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Total */}
+                    <div style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                      padding: "16px 0 0",
+                      marginTop: 16,
+                      borderTop: "2px solid #1B2A4A",
+                    }}>
+                      <span style={{ fontSize: 16, fontWeight: 700, color: "#1B2A4A" }}>
+                        Total a Receber
+                      </span>
+                      <span style={{
+                        fontSize: 26, fontWeight: 800,
+                        fontFamily: "'JetBrains Mono', monospace",
+                        color: getTotal(selected) >= 0 ? "#16A34A" : "#DC2626",
+                      }}>
+                        {formatCurrency(getTotal(selected))}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <div style={{
+                    padding: 32, textAlign: "center", color: "#9CA3AF",
+                  }}>
+                    <span style={{ fontSize: 32 }}>📄</span>
+                    <div style={{ marginTop: 8, fontSize: 13 }}>
+                      Faça upload do PDF para ver o contracheque
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Add Adjustment Form */}
+              {selected.paycheckExtracted && selected.status !== "sent" && (
+                <div style={{
+                  background: "#fff", borderRadius: 16, padding: 24,
+                  border: "1px solid #E5E2DB",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+                  marginBottom: 20,
+                }}>
+                  <div style={{
+                    fontSize: 11, fontWeight: 600, textTransform: "uppercase",
+                    letterSpacing: 1, color: "#9CA3AF", marginBottom: 16,
+                  }}>
+                    Adicionar Ajuste
+                  </div>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      <button
+                        onClick={() => setNewAdj(p => ({ ...p, type: "add" }))}
+                        style={{
+                          padding: "8px 14px", borderRadius: "8px 0 0 8px", fontSize: 13,
+                          fontWeight: 600, cursor: "pointer",
+                          border: "1px solid",
+                          borderColor: newAdj.type === "add" ? "#22C55E" : "#E5E2DB",
+                          background: newAdj.type === "add" ? "#22C55E" : "#fff",
+                          color: newAdj.type === "add" ? "#fff" : "#6B7280",
+                        }}
+                      >
+                        + Adicional
+                      </button>
+                      <button
+                        onClick={() => setNewAdj(p => ({ ...p, type: "sub" }))}
+                        style={{
+                          padding: "8px 14px", borderRadius: "0 8px 8px 0", fontSize: 13,
+                          fontWeight: 600, cursor: "pointer",
+                          border: "1px solid",
+                          borderColor: newAdj.type === "sub" ? "#EF4444" : "#E5E2DB",
+                          background: newAdj.type === "sub" ? "#EF4444" : "#fff",
+                          color: newAdj.type === "sub" ? "#fff" : "#6B7280",
+                        }}
+                      >
+                        − Desconto
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Descrição (ex: Aula extra, Vale transporte)"
+                      value={newAdj.description}
+                      onChange={e => setNewAdj(p => ({ ...p, description: e.target.value }))}
+                      style={{
+                        flex: 1, minWidth: 180, padding: "8px 12px", borderRadius: 8,
+                        border: "1px solid #E5E2DB", fontSize: 13, outline: "none",
+                      }}
+                      onFocus={e => e.target.style.borderColor = "#F59E0B"}
+                      onBlur={e => e.target.style.borderColor = "#E5E2DB"}
+                    />
+                    <input
+                      type="number"
+                      placeholder="Valor (R$)"
+                      value={newAdj.value}
+                      onChange={e => setNewAdj(p => ({ ...p, value: e.target.value }))}
+                      style={{
+                        width: 120, padding: "8px 12px", borderRadius: 8,
+                        border: "1px solid #E5E2DB", fontSize: 13, outline: "none",
+                        fontFamily: "'JetBrains Mono', monospace",
+                      }}
+                      onFocus={e => e.target.style.borderColor = "#F59E0B"}
+                      onBlur={e => e.target.style.borderColor = "#E5E2DB"}
+                    />
+                    <button onClick={addAdjustment} style={{
+                      padding: "8px 20px", borderRadius: 8,
+                      background: "#F59E0B", color: "#fff",
+                      border: "none", cursor: "pointer",
+                      fontSize: 13, fontWeight: 700,
+                      transition: "background 0.2s",
+                    }}
+                    onMouseOver={e => e.currentTarget.style.background = "#D97706"}
+                    onMouseOut={e => e.currentTarget.style.background = "#F59E0B"}
+                    >
+                      Adicionar
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Email Preview */}
+              {selected.paycheckExtracted && (
+                <div style={{
+                  background: "#fff", borderRadius: 16, padding: 24,
+                  border: "1px solid #E5E2DB",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+                  marginBottom: 20,
+                }}>
+                  <div style={{
+                    fontSize: 11, fontWeight: 600, textTransform: "uppercase",
+                    letterSpacing: 1, color: "#9CA3AF", marginBottom: 16,
+                  }}>
+                    Prévia do E-mail
+                  </div>
+                  <div style={{
+                    background: "#F8F7F4", borderRadius: 10, padding: 20,
+                    fontSize: 13, lineHeight: 1.7, color: "#374151",
+                    border: "1px solid #E5E2DB",
+                  }}>
+                    <div style={{ marginBottom: 6 }}>
+                      <strong>Para:</strong> {selected.email}
+                    </div>
+                    <div style={{ marginBottom: 12 }}>
+                      <strong>Assunto:</strong> Contracheque — {currentMonth}
+                    </div>
+                    <hr style={{ border: "none", borderTop: "1px solid #E5E2DB", margin: "12px 0" }} />
+                    <p>Olá, {selected.name.split(" ")[0]}!</p>
+                    <p>Segue em anexo o seu contracheque referente a <strong>{currentMonth}</strong>.</p>
+                    {selected.adjustments.length > 0 && (
+                      <>
+                        <p>Informamos os seguintes ajustes neste mês:</p>
+                        <ul style={{ paddingLeft: 20 }}>
+                          {selected.adjustments.map((adj, i) => (
+                            <li key={i}>
+                              {adj.description}: <strong style={{
+                                color: adj.type === "add" ? "#16A34A" : "#DC2626",
+                              }}>
+                                {adj.type === "add" ? "+" : "−"} {formatCurrency(adj.value)}
+                              </strong>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                    <p><strong>Valor total a receber: {formatCurrency(getTotal(selected))}</strong></p>
+                    <p>Em caso de dúvidas, entre em contato com o setor administrativo.</p>
+                    <p>Atenciosamente,<br />Administração Escolar</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              {selected.paycheckExtracted && selected.status !== "sent" && (
+                <div style={{ display: "flex", gap: 12 }}>
+                  {selected.status === "pending" ? (
+                    <button onClick={validateEmployee} style={{
+                      flex: 1, padding: "14px 24px", borderRadius: 12,
+                      background: "linear-gradient(135deg, #22C55E, #16A34A)",
+                      color: "#fff", border: "none", cursor: "pointer",
+                      fontSize: 15, fontWeight: 700,
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                      boxShadow: "0 4px 12px rgba(34,197,94,0.3)",
+                      transition: "transform 0.2s",
+                    }}
+                    onMouseOver={e => e.currentTarget.style.transform = "translateY(-1px)"}
+                    onMouseOut={e => e.currentTarget.style.transform = "none"}
+                    >
+                      ✓ Validar e Próximo
+                    </button>
+                  ) : (
+                    <button onClick={unvalidateEmployee} style={{
+                      flex: 1, padding: "14px 24px", borderRadius: 12,
+                      background: "#fff",
+                      color: "#F59E0B", border: "2px solid #F59E0B", cursor: "pointer",
+                      fontSize: 15, fontWeight: 700,
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                      transition: "all 0.2s",
+                    }}
+                    onMouseOver={e => { e.currentTarget.style.background = "#FEF3C7"; }}
+                    onMouseOut={e => { e.currentTarget.style.background = "#fff"; }}
+                    >
+                      ↩ Reabrir para Edição
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
-      </footer>
+      </div>
+
+      {/* Send Modal */}
+      {showSendModal && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          zIndex: 200,
+          backdropFilter: "blur(4px)",
+        }} onClick={() => !sendingEmails && setShowSendModal(false)}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: "#fff", borderRadius: 20, padding: 32,
+            width: 440, boxShadow: "0 20px 60px rgba(0,0,0,0.2)",
+          }}>
+            {!sendingEmails ? (
+              <>
+                <div style={{ textAlign: "center", marginBottom: 24 }}>
+                  <span style={{ fontSize: 48 }}>📧</span>
+                  <h3 style={{ fontSize: 20, fontWeight: 800, color: "#1B2A4A", margin: "12px 0 4px" }}>
+                    Enviar Contracheques
+                  </h3>
+                  <p style={{ fontSize: 14, color: "#6B7280", margin: 0 }}>
+                    Você está prestes a enviar {stats.reviewed} contracheque{stats.reviewed > 1 ? "s" : ""} por e-mail.
+                  </p>
+                </div>
+                <div style={{
+                  background: "#F8F7F4", borderRadius: 12, padding: 16, marginBottom: 24,
+                  maxHeight: 200, overflowY: "auto",
+                }}>
+                  {employees.filter(e => e.status === "reviewed").map(e => (
+                    <div key={e.id} style={{
+                      display: "flex", justifyContent: "space-between",
+                      padding: "6px 0", fontSize: 13,
+                      borderBottom: "1px solid #E5E2DB",
+                    }}>
+                      <span style={{ color: "#374151" }}>{e.name}</span>
+                      <span style={{
+                        fontFamily: "'JetBrains Mono', monospace",
+                        fontWeight: 600, color: "#1B2A4A",
+                      }}>
+                        {formatCurrency(getTotal(e))}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <button onClick={() => setShowSendModal(false)} style={{
+                    flex: 1, padding: "12px 20px", borderRadius: 10,
+                    background: "#F3F4F6", color: "#6B7280",
+                    border: "none", cursor: "pointer",
+                    fontSize: 14, fontWeight: 600,
+                  }}>
+                    Cancelar
+                  </button>
+                  <button onClick={handleSendAll} style={{
+                    flex: 1, padding: "12px 20px", borderRadius: 10,
+                    background: "linear-gradient(135deg, #1B2A4A, #2D4A7A)",
+                    color: "#fff", border: "none", cursor: "pointer",
+                    fontSize: 14, fontWeight: 700,
+                    boxShadow: "0 4px 12px rgba(27,42,74,0.3)",
+                  }}>
+                    Confirmar Envio
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div style={{ textAlign: "center", padding: "20px 0" }}>
+                <div style={{
+                  width: 64, height: 64, borderRadius: "50%",
+                  background: "#F0FDF4", border: "3px solid #22C55E",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 28, margin: "0 auto 16px",
+                }}>
+                  📤
+                </div>
+                <h3 style={{ fontSize: 18, fontWeight: 700, color: "#1B2A4A", margin: "0 0 8px" }}>
+                  Enviando e-mails...
+                </h3>
+                <div style={{
+                  fontSize: 32, fontWeight: 800, color: "#22C55E",
+                  fontFamily: "'JetBrains Mono', monospace",
+                  margin: "12px 0",
+                }}>
+                  {emailsSent} / {stats.reviewed}
+                </div>
+                <div style={{
+                  height: 6, borderRadius: 3, background: "#F3F4F6",
+                  overflow: "hidden", margin: "0 40px",
+                }}>
+                  <div style={{
+                    height: "100%", borderRadius: 3,
+                    background: "linear-gradient(90deg, #22C55E, #16A34A)",
+                    width: `${(emailsSent / stats.reviewed) * 100}%`,
+                    transition: "width 0.3s ease",
+                  }} />
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      <style>{`
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #9CA3AF; }
+      `}</style>
     </div>
   );
 }
-
-export default App;
-
-
 
 
 
