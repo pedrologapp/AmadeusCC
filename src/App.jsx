@@ -133,6 +133,102 @@ const Spinner = () => (
   }} />
 );
 
+// PDF Page Viewer - renders a single page from a PDF
+const PdfPageViewer = ({ pdfUrl, pageNumber }) => {
+  const canvasRef = useRef(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    if (!pdfUrl || !pageNumber) return;
+    let cancelled = false;
+
+    const loadPdf = async () => {
+      setLoading(true);
+      setError(false);
+      try {
+        // Load pdf.js dynamically
+        if (!window.pdfjsLib) {
+          await new Promise((resolve, reject) => {
+            if (document.getElementById("pdfjs-script")) {
+              const check = setInterval(() => {
+                if (window.pdfjsLib) { clearInterval(check); resolve(); }
+              }, 100);
+              setTimeout(() => { clearInterval(check); reject(new Error("timeout")); }, 10000);
+              return;
+            }
+            const script = document.createElement("script");
+            script.id = "pdfjs-script";
+            script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+            script.onload = () => {
+              window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+                "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+              resolve();
+            };
+            script.onerror = reject;
+            document.head.appendChild(script);
+          });
+        }
+
+        const pdf = await window.pdfjsLib.getDocument(pdfUrl).promise;
+        if (cancelled) return;
+        const page = await pdf.getPage(pageNumber);
+        if (cancelled) return;
+
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        const viewport = page.getViewport({ scale: 1.5 });
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        setLoading(false);
+      } catch (err) {
+        console.error("Erro ao renderizar PDF:", err);
+        if (!cancelled) { setError(true); setLoading(false); }
+      }
+    };
+
+    loadPdf();
+    return () => { cancelled = true; };
+  }, [pdfUrl, pageNumber]);
+
+  if (error) {
+    return (
+      <div style={{
+        padding: 20, textAlign: "center", color: "#9CA3AF",
+        background: "#F9FAFB", borderRadius: 8, border: "1px solid #E5E7EB",
+        fontSize: 13,
+      }}>
+        📄 Página do contracheque indisponível
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: "relative", marginBottom: 16 }}>
+      {loading && (
+        <div style={{
+          padding: 20, textAlign: "center", color: "#6B7280",
+          background: "#F9FAFB", borderRadius: 8, border: "1px solid #E5E7EB",
+        }}>
+          <Spinner />
+          <div style={{ fontSize: 12, marginTop: 8 }}>Carregando contracheque...</div>
+        </div>
+      )}
+      <canvas
+        ref={canvasRef}
+        style={{
+          width: "100%", height: "auto", borderRadius: 8,
+          border: "1px solid #E5E2DB",
+          display: loading ? "none" : "block",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
+        }}
+      />
+    </div>
+  );
+};
+
 // ============================================================
 // Main App
 // ============================================================
@@ -328,12 +424,14 @@ export default function PayrollApp() {
   };
 
   const addAdjustment = async () => {
-    if (!selectedPaycheckId || !newAdj.description || !newAdj.value) return;
+    if (!selectedPaycheckId || !newAdj.value) return;
+    const catLabel = ADJUSTMENT_CATEGORIES.find((c) => c.value === newAdj.category)?.label || "";
+    const desc = newAdj.description || catLabel || "Ajuste";
     try {
       await supabase.insert("adjustments", {
         paycheck_id: selectedPaycheckId,
         type: newAdj.type,
-        description: newAdj.description,
+        description: desc,
         value: parseFloat(newAdj.value),
         category: newAdj.category,
       });
@@ -448,6 +546,10 @@ export default function PayrollApp() {
   const periodLabel = currentPeriod
     ? `${MONTH_NAMES[currentPeriod.reference_month - 1]} ${currentPeriod.reference_year}`
     : `${MONTH_NAMES[refMonth - 1]} ${refYear}`;
+
+  const pdfUrl = currentPeriod
+    ? `${CONFIG.SUPABASE_URL}/storage/v1/object/public/paychecks/${currentPeriod.reference_year}/${String(currentPeriod.reference_month).padStart(2, "0")}.pdf`
+    : null;
 
   const details = selectedPaycheck ? getExtractedDetails(selectedPaycheck) : [];
   const earnings = details.filter((d) => d.earnings > 0);
@@ -753,6 +855,17 @@ export default function PayrollApp() {
                     O PDF completo está anexo neste e-mail.
                   </p>
 
+                  {/* PDF Page Preview */}
+                  {pdfUrl && selectedPaycheck?.pdf_page_number && (
+                    <div style={{ marginBottom: 24 }}>
+                      <div style={{
+                        fontSize: 11, fontWeight: 600, textTransform: "uppercase",
+                        letterSpacing: 1, color: "#9CA3AF", marginBottom: 10,
+                      }}>Contracheque — Página {selectedPaycheck.pdf_page_number}</div>
+                      <PdfPageViewer pdfUrl={pdfUrl} pageNumber={selectedPaycheck.pdf_page_number} />
+                    </div>
+                  )}
+
                   {/* Summary card */}
                   <div style={{
                     background: "#F8F7F4", borderRadius: 12, padding: "20px 24px",
@@ -953,7 +1066,14 @@ export default function PayrollApp() {
                           ))}
                         </div>
                         <select value={newAdj.category}
-                          onChange={(e) => setNewAdj((p) => ({ ...p, category: e.target.value }))}
+                          onChange={(e) => {
+                            const cat = ADJUSTMENT_CATEGORIES.find((c) => c.value === e.target.value);
+                            setNewAdj((p) => ({
+                              ...p,
+                              category: e.target.value,
+                              description: cat ? cat.label : p.description,
+                            }));
+                          }}
                           style={{
                             padding: "7px 8px", borderRadius: 8,
                             border: "1px solid #E5E2DB", fontSize: 12, outline: "none",
@@ -962,7 +1082,7 @@ export default function PayrollApp() {
                             <option key={c.value} value={c.value}>{c.label}</option>
                           ))}
                         </select>
-                        <input type="text" placeholder="Descrição"
+                        <input type="text" placeholder="Descrição (opcional)"
                           value={newAdj.description}
                           onChange={(e) => setNewAdj((p) => ({ ...p, description: e.target.value }))}
                           style={{
@@ -1045,7 +1165,6 @@ export default function PayrollApp() {
     </div>
   );
 }
-
 
 
 
