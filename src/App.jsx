@@ -100,7 +100,7 @@ const ADJUSTMENT_CATEGORIES = [
 // ============================================================
 const StatusBadge = ({ status }) => {
   const config = {
-    extracted: { label: "Extraído", bg: "#FEF9C3", color: "#854D0E", border: "#FDE047" },
+    extracted: { label: "Pendente", bg: "#FEF9C3", color: "#854D0E", border: "#FDE047" },
     pending_review: { label: "Pendente", bg: "#FEF3C7", color: "#92400E", border: "#FCD34D" },
     reviewed: { label: "Validado", bg: "#D1FAE5", color: "#065F46", border: "#6EE7B7" },
     approved: { label: "Aprovado", bg: "#DBEAFE", color: "#1E40AF", border: "#93C5FD" },
@@ -109,6 +109,7 @@ const StatusBadge = ({ status }) => {
     draft: { label: "Rascunho", bg: "#F3F4F6", color: "#374151", border: "#D1D5DB" },
     processing: { label: "Processando", bg: "#FEF3C7", color: "#92400E", border: "#FCD34D" },
     reviewing: { label: "Em Revisão", bg: "#DBEAFE", color: "#1E40AF", border: "#93C5FD" },
+    skipped: { label: "Não Enviar", bg: "#F3F4F6", color: "#6B7280", border: "#D1D5DB" },
   };
   const c = config[status] || config.draft;
   return (
@@ -170,7 +171,10 @@ export default function PayrollApp() {
     const matchesSearch =
       collab.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       (collab.role || "").toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesFilter = filterStatus === "all" || pc.status === filterStatus;
+    const matchesFilter =
+      filterStatus === "all" ||
+      (filterStatus === "pending_review" && ["extracted", "pending_review"].includes(pc.status)) ||
+      pc.status === filterStatus;
     return matchesSearch && matchesFilter;
   });
 
@@ -179,6 +183,7 @@ export default function PayrollApp() {
     pending: paychecks.filter((p) => ["extracted", "pending_review"].includes(p.status)).length,
     reviewed: paychecks.filter((p) => ["reviewed", "approved"].includes(p.status)).length,
     sent: paychecks.filter((p) => p.status === "sent").length,
+    skipped: paychecks.filter((p) => p.status === "skipped").length,
   };
 
   // ============================================================
@@ -197,18 +202,18 @@ export default function PayrollApp() {
     try {
       const data = await supabase.select("payroll_periods", "", "reference_year.desc,reference_month.desc");
       setPeriods(data);
-      if (data.length > 0 && !currentPeriodId) {
-        setCurrentPeriodId(data[0].id);
-      }
+      return data;
     } catch (err) {
       console.error("Erro ao carregar períodos:", err);
+      return [];
     }
-  }, [currentPeriodId]);
+  }, []);
 
-  const loadPaychecks = useCallback(async () => {
-    if (!currentPeriodId) return;
+  const loadPaychecks = useCallback(async (periodId) => {
+    const pid = periodId || currentPeriodId;
+    if (!pid) return;
     try {
-      const data = await supabase.select("paychecks", `payroll_period_id=eq.${currentPeriodId}`, "created_at.asc");
+      const data = await supabase.select("paychecks", `payroll_period_id=eq.${pid}`, "created_at.asc");
       setPaychecks(data);
       const adjMap = {};
       for (const pc of data) {
@@ -221,19 +226,45 @@ export default function PayrollApp() {
     }
   }, [currentPeriodId]);
 
+  // Init
   useEffect(() => {
     const init = async () => {
       setLoading(true);
       await loadCollaborators();
-      await loadPeriods();
+      const data = await loadPeriods();
+      if (data.length > 0) {
+        setCurrentPeriodId(data[0].id);
+        setRefMonth(data[0].reference_month);
+        setRefYear(data[0].reference_year);
+      }
       setLoading(false);
     };
     init();
   }, []);
 
   useEffect(() => {
-    if (currentPeriodId) loadPaychecks();
-  }, [currentPeriodId, loadPaychecks]);
+    if (currentPeriodId) {
+      loadPaychecks(currentPeriodId);
+      setSelectedPaycheckId(null);
+    }
+  }, [currentPeriodId]);
+
+  // Mudar mês/ano => buscar período correspondente
+  const handleMonthYearChange = useCallback((month, year) => {
+    setRefMonth(month);
+    setRefYear(year);
+    const found = periods.find(
+      (p) => p.reference_month === month && p.reference_year === year
+    );
+    if (found) {
+      setCurrentPeriodId(found.id);
+    } else {
+      setCurrentPeriodId(null);
+      setPaychecks([]);
+      setAdjustments({});
+      setSelectedPaycheckId(null);
+    }
+  }, [periods]);
 
   // ============================================================
   // Actions
@@ -245,62 +276,45 @@ export default function PayrollApp() {
       setError("Por favor, selecione um arquivo PDF.");
       return;
     }
-
     setUploading(true);
     setUploadProgress("Enviando PDF para processamento...");
     setError(null);
-
     try {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("reference_month", String(refMonth));
       formData.append("reference_year", String(refYear));
-
-      const res = await fetch(CONFIG.N8N_WEBHOOK_PROCESS_PDF, {
-        method: "POST",
-        body: formData,
-      });
-
+      const res = await fetch(CONFIG.N8N_WEBHOOK_PROCESS_PDF, { method: "POST", body: formData });
       if (!res.ok) throw new Error("Erro ao enviar PDF para o n8n");
-      const result = await res.json();
-      setUploadProgress("PDF enviado! A IA está processando as páginas...");
-
-      if (result.period_id) setCurrentPeriodId(result.period_id);
-
-      const searchMonth = String(refMonth);
-      const searchYear = String(refYear);
-
+      await res.json();
+      setUploadProgress("PDF enviado! A IA está processando...");
+      const sm = String(refMonth);
+      const sy = String(refYear);
       let attempts = 0;
       const poll = setInterval(async () => {
         attempts++;
         setUploadProgress(`Processando... (verificação ${attempts})`);
-
         if (attempts > 60) {
           clearInterval(poll);
           setUploadProgress("Processamento demorou mais que o esperado. Recarregue a página.");
           setUploading(false);
           return;
         }
-
         try {
-          // Buscar período por mês/ano (funciona mesmo sem period_id do webhook)
-          const periods = await supabase.select(
+          const found = await supabase.select(
             "payroll_periods",
-            `reference_month=eq.${searchMonth}&reference_year=eq.${searchYear}`,
+            `reference_month=eq.${sm}&reference_year=eq.${sy}`,
             "created_at.desc"
           );
-
-          if (periods.length > 0) {
-            const period = periods[0];
-            setCurrentPeriodId(period.id);
-
-            if (period.status !== "processing") {
-              clearInterval(poll);
-              await loadPeriods();
-              await loadPaychecks();
-              setUploadProgress("");
-              setUploading(false);
-            }
+          if (found.length > 0 && found[0].status !== "processing") {
+            clearInterval(poll);
+            setCurrentPeriodId(found[0].id);
+            setRefMonth(found[0].reference_month);
+            setRefYear(found[0].reference_year);
+            await loadPeriods();
+            await loadPaychecks(found[0].id);
+            setUploadProgress("");
+            setUploading(false);
           }
         } catch (err) {
           console.error("Erro no polling:", err);
@@ -316,17 +330,13 @@ export default function PayrollApp() {
   const addAdjustment = async () => {
     if (!selectedPaycheckId || !newAdj.description || !newAdj.value) return;
     try {
-      const result = await supabase.insert("adjustments", {
+      await supabase.insert("adjustments", {
         paycheck_id: selectedPaycheckId,
         type: newAdj.type,
         description: newAdj.description,
         value: parseFloat(newAdj.value),
         category: newAdj.category,
       });
-      setAdjustments((prev) => ({
-        ...prev,
-        [selectedPaycheckId]: [...(prev[selectedPaycheckId] || []), ...result],
-      }));
       setNewAdj({ type: "addition", description: "", value: "", category: "other" });
       await loadPaychecks();
     } catch (err) {
@@ -337,10 +347,6 @@ export default function PayrollApp() {
   const removeAdjustment = async (adjId) => {
     try {
       await supabase.delete("adjustments", adjId);
-      setAdjustments((prev) => ({
-        ...prev,
-        [selectedPaycheckId]: (prev[selectedPaycheckId] || []).filter((a) => a.id !== adjId),
-      }));
       await loadPaychecks();
     } catch (err) {
       setError(`Erro ao remover ajuste: ${err.message}`);
@@ -352,11 +358,24 @@ export default function PayrollApp() {
     try {
       await supabase.update("paychecks", selectedPaycheckId, { status: "reviewed" });
       await loadPaychecks();
-      const currentIndex = filteredPaychecks.findIndex((p) => p.id === selectedPaycheckId);
-      const next = filteredPaychecks[currentIndex + 1];
+      const idx = filteredPaychecks.findIndex((p) => p.id === selectedPaycheckId);
+      const next = filteredPaychecks[idx + 1];
       if (next) setSelectedPaycheckId(next.id);
     } catch (err) {
       setError(`Erro ao validar: ${err.message}`);
+    }
+  };
+
+  const skipPaycheck = async () => {
+    if (!selectedPaycheckId) return;
+    try {
+      await supabase.update("paychecks", selectedPaycheckId, { status: "skipped" });
+      await loadPaychecks();
+      const idx = filteredPaychecks.findIndex((p) => p.id === selectedPaycheckId);
+      const next = filteredPaychecks[idx + 1];
+      if (next) setSelectedPaycheckId(next.id);
+    } catch (err) {
+      setError(`Erro: ${err.message}`);
     }
   };
 
@@ -381,16 +400,11 @@ export default function PayrollApp() {
         body: JSON.stringify({ period_id: currentPeriodId }),
       });
       if (!res.ok) throw new Error("Erro ao disparar envio de e-mails");
-
       const poll = setInterval(async () => {
         await loadPaychecks();
-        const stillReviewed = paychecks.filter((p) => p.status === "reviewed").length;
-        if (stillReviewed === 0) {
-          clearInterval(poll);
-          setSending(false);
-        }
+        const remaining = paychecks.filter((p) => p.status === "reviewed").length;
+        if (remaining === 0) { clearInterval(poll); setSending(false); }
       }, 3000);
-
       setTimeout(() => { clearInterval(poll); setSending(false); }, 120000);
     } catch (err) {
       setError(`Erro: ${err.message}`);
@@ -400,7 +414,17 @@ export default function PayrollApp() {
 
   const getTotal = (pc) => {
     if (!pc) return 0;
-    return pc.final_value || pc.extracted_net_value || pc.extracted_gross_value || 0;
+    const base = pc.extracted_net_value || 0;
+    const adjs = adjustments[pc.id] || [];
+    return adjs.reduce((sum, a) => sum + (a.type === "addition" ? a.value : -a.value), base);
+  };
+
+  const getExtractedDetails = (pc) => {
+    if (!pc?.ai_extracted_data) return [];
+    try {
+      const d = typeof pc.ai_extracted_data === "string" ? JSON.parse(pc.ai_extracted_data) : pc.ai_extracted_data;
+      return Array.isArray(d) ? d : [];
+    } catch { return []; }
   };
 
   // ============================================================
@@ -420,6 +444,14 @@ export default function PayrollApp() {
       </div>
     );
   }
+
+  const periodLabel = currentPeriod
+    ? `${MONTH_NAMES[currentPeriod.reference_month - 1]} ${currentPeriod.reference_year}`
+    : `${MONTH_NAMES[refMonth - 1]} ${refYear}`;
+
+  const details = selectedPaycheck ? getExtractedDetails(selectedPaycheck) : [];
+  const earnings = details.filter((d) => d.earnings > 0);
+  const deductions = details.filter((d) => d.deductions > 0);
 
   return (
     <div style={{
@@ -448,25 +480,26 @@ export default function PayrollApp() {
             </div>
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {periods.length > 0 && (
-            <select
-              value={currentPeriodId || ""}
-              onChange={(e) => { setCurrentPeriodId(e.target.value); setSelectedPaycheckId(null); }}
-              style={{
-                background: "rgba(255,255,255,0.12)", color: "#fff",
-                border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8,
-                padding: "6px 12px", fontSize: 13, fontWeight: 500, cursor: "pointer", outline: "none",
-              }}
-            >
-              {periods.map((p) => (
-                <option key={p.id} value={p.id} style={{ color: "#1a1a1a" }}>
-                  {MONTH_NAMES[p.reference_month - 1]} {p.reference_year}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
+        {periods.length > 0 && (
+          <select
+            value={currentPeriodId || ""}
+            onChange={(e) => {
+              const p = periods.find((x) => x.id === e.target.value);
+              if (p) { setCurrentPeriodId(p.id); setRefMonth(p.reference_month); setRefYear(p.reference_year); }
+            }}
+            style={{
+              background: "rgba(255,255,255,0.12)", color: "#fff",
+              border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8,
+              padding: "6px 12px", fontSize: 13, fontWeight: 500, cursor: "pointer", outline: "none",
+            }}
+          >
+            {periods.map((p) => (
+              <option key={p.id} value={p.id} style={{ color: "#1a1a1a" }}>
+                {MONTH_NAMES[p.reference_month - 1]} {p.reference_year}
+              </option>
+            ))}
+          </select>
+        )}
       </header>
 
       {error && (
@@ -483,12 +516,12 @@ export default function PayrollApp() {
       )}
 
       <div style={{ display: "flex", height: "calc(100vh - 64px)" }}>
-        {/* LEFT PANEL */}
+        {/* ===== LEFT PANEL ===== */}
         <div style={{
           width: 380, borderRight: "1px solid #E5E2DB",
           display: "flex", flexDirection: "column", background: "#FFFFFF",
         }}>
-          {/* PDF Upload */}
+          {/* Upload */}
           <div style={{ padding: 20, borderBottom: "1px solid #E5E2DB" }}>
             {uploading ? (
               <div style={{
@@ -503,7 +536,8 @@ export default function PayrollApp() {
             ) : (
               <div>
                 <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-                  <select value={refMonth} onChange={(e) => setRefMonth(Number(e.target.value))}
+                  <select value={refMonth}
+                    onChange={(e) => handleMonthYearChange(Number(e.target.value), refYear)}
                     style={{
                       flex: 1, padding: "6px 8px", borderRadius: 8,
                       border: "1px solid #E5E2DB", fontSize: 13, outline: "none",
@@ -513,7 +547,7 @@ export default function PayrollApp() {
                     ))}
                   </select>
                   <input type="number" value={refYear}
-                    onChange={(e) => setRefYear(Number(e.target.value))}
+                    onChange={(e) => handleMonthYearChange(refMonth, Number(e.target.value))}
                     style={{
                       width: 80, padding: "6px 8px", borderRadius: 8,
                       border: "1px solid #E5E2DB", fontSize: 13, outline: "none",
@@ -530,9 +564,7 @@ export default function PayrollApp() {
                   <span style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A" }}>
                     Upload do PDF de Contracheques
                   </span>
-                  <span style={{ fontSize: 11, color: "#94A3B8" }}>
-                    Selecione o mês/ano e clique aqui
-                  </span>
+                  <span style={{ fontSize: 11, color: "#94A3B8" }}>Selecione o mês/ano e clique aqui</span>
                 </label>
               </div>
             )}
@@ -541,23 +573,24 @@ export default function PayrollApp() {
           {/* Stats */}
           {paychecks.length > 0 && (
             <div style={{
-              display: "grid", gridTemplateColumns: "repeat(3, 1fr)",
-              gap: 8, padding: "12px 20px", borderBottom: "1px solid #E5E2DB",
+              display: "grid", gridTemplateColumns: "repeat(4, 1fr)",
+              gap: 6, padding: "12px 20px", borderBottom: "1px solid #E5E2DB",
             }}>
               {[
                 { label: "Pendentes", value: stats.pending, color: "#F59E0B" },
                 { label: "Validados", value: stats.reviewed, color: "#22C55E" },
+                { label: "Pular", value: stats.skipped, color: "#9CA3AF" },
                 { label: "Enviados", value: stats.sent, color: "#3B82F6" },
               ].map((s) => (
                 <div key={s.label} style={{
-                  textAlign: "center", padding: "8px 4px", borderRadius: 8, background: "#F8F7F4",
+                  textAlign: "center", padding: "6px 2px", borderRadius: 8, background: "#F8F7F4",
                 }}>
                   <div style={{
-                    fontSize: 22, fontWeight: 800, color: s.color,
+                    fontSize: 20, fontWeight: 800, color: s.color,
                     fontFamily: "'JetBrains Mono', monospace",
                   }}>{s.value}</div>
                   <div style={{
-                    fontSize: 10, color: "#6B7280", fontWeight: 500,
+                    fontSize: 9, color: "#6B7280", fontWeight: 500,
                     textTransform: "uppercase", letterSpacing: 0.5,
                   }}>{s.label}</div>
                 </div>
@@ -565,7 +598,7 @@ export default function PayrollApp() {
             </div>
           )}
 
-          {/* Search & Filter */}
+          {/* Search + Filter */}
           {paychecks.length > 0 && (
             <div style={{ padding: "12px 20px", borderBottom: "1px solid #E5E2DB" }}>
               <input type="text" placeholder="Buscar colaborador..."
@@ -581,6 +614,7 @@ export default function PayrollApp() {
                   { key: "all", label: "Todos" },
                   { key: "pending_review", label: "Pendentes" },
                   { key: "reviewed", label: "Validados" },
+                  { key: "skipped", label: "Não Enviar" },
                   { key: "sent", label: "Enviados" },
                 ].map((f) => (
                   <button key={f.key} onClick={() => setFilterStatus(f.key)} style={{
@@ -596,13 +630,11 @@ export default function PayrollApp() {
             </div>
           )}
 
-          {/* Employee List */}
+          {/* List */}
           <div style={{ flex: 1, overflowY: "auto" }}>
             {filteredPaychecks.length === 0 && !uploading && (
               <div style={{ padding: 32, textAlign: "center", color: "#9CA3AF", fontSize: 13 }}>
-                {paychecks.length === 0
-                  ? "Nenhum contracheque ainda. Faça upload de um PDF."
-                  : "Nenhum resultado encontrado."}
+                {paychecks.length === 0 ? "Nenhum contracheque ainda. Faça upload de um PDF." : "Nenhum resultado encontrado."}
               </div>
             )}
             {filteredPaychecks.map((pc) => {
@@ -615,6 +647,7 @@ export default function PayrollApp() {
                     padding: "14px 20px", borderBottom: "1px solid #F3F0EB", cursor: "pointer",
                     background: selectedPaycheckId === pc.id ? "#FEF9EE" : "transparent",
                     borderLeft: selectedPaycheckId === pc.id ? "3px solid #F59E0B" : "3px solid transparent",
+                    opacity: pc.status === "skipped" ? 0.5 : 1,
                   }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                     <div>
@@ -644,7 +677,7 @@ export default function PayrollApp() {
             })}
           </div>
 
-          {/* Send Button */}
+          {/* Send batch */}
           {stats.reviewed > 0 && (
             <div style={{ padding: 16, borderTop: "1px solid #E5E2DB" }}>
               <button onClick={sendBatchEmails} disabled={sending} style={{
@@ -655,14 +688,14 @@ export default function PayrollApp() {
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
                 boxShadow: "0 4px 12px rgba(27,42,74,0.3)",
               }}>
-                {sending ? <><Spinner /> Enviando...</> : <>📧 Enviar Lote ({stats.reviewed})</>}
+                {sending ? <><Spinner /> Enviando...</> : <>📧 Enviar {stats.reviewed} e-mail{stats.reviewed > 1 ? "s" : ""}</>}
               </button>
             </div>
           )}
         </div>
 
-        {/* RIGHT PANEL */}
-        <div style={{ flex: 1, overflowY: "auto", padding: 32 }}>
+        {/* ===== RIGHT PANEL - EMAIL PREVIEW ===== */}
+        <div style={{ flex: 1, overflowY: "auto", padding: 32, background: "#EDEAE5" }}>
           {!selectedPaycheck ? (
             <div style={{
               height: "100%", display: "flex", flexDirection: "column",
@@ -670,199 +703,331 @@ export default function PayrollApp() {
             }}>
               <span style={{ fontSize: 56, marginBottom: 16, opacity: 0.5 }}>📋</span>
               <div style={{ fontSize: 18, fontWeight: 600, color: "#6B7280" }}>Selecione um colaborador</div>
-              <div style={{ fontSize: 13, marginTop: 4 }}>Clique em um nome na lista para revisar</div>
+              <div style={{ fontSize: 13, marginTop: 4 }}>Clique em um nome na lista para pré-visualizar o e-mail</div>
             </div>
           ) : (
-            <div style={{ maxWidth: 720, margin: "0 auto" }}>
-              {/* Header */}
-              <div style={{ marginBottom: 28 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
-                  <h2 style={{ fontSize: 24, fontWeight: 800, color: "#1B2A4A", margin: 0 }}>
-                    {selectedCollaborator?.full_name}
-                  </h2>
-                  <StatusBadge status={selectedPaycheck.status} />
+            <div style={{ maxWidth: 680, margin: "0 auto" }}>
+
+              {/* Envelope */}
+              <div style={{
+                background: "#fff", borderRadius: "12px 12px 0 0", padding: "16px 24px",
+                border: "1px solid #D1D5DB", borderBottom: "none", fontSize: 13, color: "#6B7280",
+              }}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+                  <span style={{ fontWeight: 600, color: "#374151", minWidth: 50 }}>Para:</span>
+                  <span>{selectedCollaborator?.full_name} &lt;{selectedCollaborator?.email}&gt;</span>
                 </div>
-                <div style={{ fontSize: 14, color: "#6B7280" }}>{selectedCollaborator?.role}</div>
-                <div style={{ fontSize: 12, color: "#9CA3AF", marginTop: 2 }}>
-                  ✉️ {selectedCollaborator?.email}
+                <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+                  <span style={{ fontWeight: 600, color: "#374151", minWidth: 50 }}>De:</span>
+                  <span>{CONFIG.SCHOOL_NAME} &lt;rh@escolaamadeus.com&gt;</span>
                 </div>
-                {selectedPaycheck.ai_confidence_score != null && (
-                  <div style={{ fontSize: 11, color: "#9CA3AF", marginTop: 4 }}>
-                    Confiança IA: {(selectedPaycheck.ai_confidence_score * 100).toFixed(0)}%
-                    {selectedPaycheck.ai_confidence_score < 0.6 && (
-                      <span style={{ color: "#EF4444", fontWeight: 600 }}> ⚠️ Baixa</span>
-                    )}
-                  </div>
-                )}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <span style={{ fontWeight: 600, color: "#374151", minWidth: 50 }}>Assunto:</span>
+                  <span>Seu Contracheque — {periodLabel}</span>
+                </div>
               </div>
 
-              {/* Paycheck Card */}
+              {/* Email body */}
               <div style={{
-                background: "#fff", borderRadius: 16, padding: 24,
-                border: "1px solid #E5E2DB", boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
-                marginBottom: 20,
+                background: "#fff", border: "1px solid #D1D5DB",
+                borderRadius: "0 0 12px 12px", overflow: "hidden",
               }}>
+                {/* Header bar */}
                 <div style={{
-                  fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-                  letterSpacing: 1, color: "#9CA3AF", marginBottom: 16,
-                }}>Valores Extraídos do PDF</div>
-
-                {[
-                  { label: "Salário Bruto", value: selectedPaycheck.extracted_gross_value },
-                  { label: "Descontos", value: selectedPaycheck.extracted_deductions, negative: true },
-                  { label: "Salário Líquido", value: selectedPaycheck.extracted_net_value },
-                ].map((item) => (
-                  <div key={item.label} style={{
-                    display: "flex", justifyContent: "space-between", padding: "10px 0",
-                    borderBottom: "1px solid #F3F0EB",
-                  }}>
-                    <span style={{ fontSize: 14, color: "#374151" }}>{item.label}</span>
-                    <span style={{
-                      fontSize: 16, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace",
-                      color: item.negative ? "#DC2626" : "#1B2A4A",
-                    }}>
-                      {item.negative && item.value ? "− " : ""}{formatCurrency(item.value)}
-                    </span>
+                  background: "#1B2A4A", padding: "24px 32px",
+                  color: "#fff", textAlign: "center",
+                }}>
+                  <div style={{ fontSize: 20, fontWeight: 700 }}>{CONFIG.SCHOOL_NAME}</div>
+                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4, textTransform: "uppercase", letterSpacing: 1 }}>
+                    Contracheque — {periodLabel}
                   </div>
-                ))}
+                </div>
 
-                {selectedAdjustments.length > 0 && (
-                  <div style={{ marginTop: 16 }}>
+                <div style={{ padding: "28px 32px" }}>
+                  {/* Greeting */}
+                  <p style={{ fontSize: 15, color: "#374151", lineHeight: 1.6, margin: "0 0 8px" }}>
+                    Olá, <strong>{selectedCollaborator?.full_name?.split(" ")[0]}</strong>!
+                  </p>
+                  <p style={{ fontSize: 14, color: "#6B7280", lineHeight: 1.6, margin: "0 0 24px" }}>
+                    Segue o resumo do seu contracheque referente a <strong>{periodLabel}</strong>.
+                    O PDF completo está anexo neste e-mail.
+                  </p>
+
+                  {/* Summary card */}
+                  <div style={{
+                    background: "#F8F7F4", borderRadius: 12, padding: "20px 24px",
+                    border: "1px solid #E5E2DB", marginBottom: 24,
+                  }}>
                     <div style={{
                       fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-                      letterSpacing: 1, color: "#9CA3AF", marginBottom: 10,
-                    }}>Ajustes</div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {selectedAdjustments.map((adj) => (
-                        <div key={adj.id} style={{
-                          display: "flex", alignItems: "center", gap: 10,
-                          padding: "8px 12px", borderRadius: 8,
-                          background: adj.type === "addition" ? "#F0FDF4" : "#FEF2F2",
-                          border: `1px solid ${adj.type === "addition" ? "#BBF7D0" : "#FECACA"}`,
-                          fontSize: 13,
-                        }}>
-                          <span style={{
-                            width: 22, height: 22, borderRadius: "50%",
-                            display: "flex", alignItems: "center", justifyContent: "center",
-                            fontSize: 14, fontWeight: 700,
-                            background: adj.type === "addition" ? "#22C55E" : "#EF4444", color: "#fff",
-                          }}>{adj.type === "addition" ? "+" : "−"}</span>
-                          <span style={{ flex: 1, color: "#374151" }}>{adj.description}</span>
-                          <span style={{
-                            fontWeight: 700, fontFamily: "'JetBrains Mono', monospace",
-                            color: adj.type === "addition" ? "#16A34A" : "#DC2626",
-                          }}>
-                            {adj.type === "addition" ? "+" : "−"} {formatCurrency(adj.value)}
-                          </span>
-                          {selectedPaycheck.status !== "sent" && (
-                            <button onClick={() => removeAdjustment(adj.id)} style={{
-                              background: "none", border: "none", cursor: "pointer",
-                              color: "#9CA3AF", fontSize: 16,
-                            }}>✕</button>
-                          )}
+                      letterSpacing: 1, color: "#9CA3AF", marginBottom: 16,
+                    }}>Resumo Salarial</div>
+
+                    {/* Proventos */}
+                    {earnings.length > 0 && (
+                      <div style={{ marginBottom: 16 }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#16A34A", marginBottom: 8 }}>
+                          Proventos
                         </div>
-                      ))}
+                        {earnings.map((d, i) => (
+                          <div key={i} style={{
+                            display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13,
+                            borderBottom: i < earnings.length - 1 ? "1px solid #E5E2DB" : "none",
+                          }}>
+                            <span style={{ color: "#374151" }}>
+                              {d.description}
+                              {d.reference && <span style={{ color: "#9CA3AF", marginLeft: 6, fontSize: 11 }}>({d.reference})</span>}
+                            </span>
+                            <span style={{ fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", color: "#16A34A" }}>
+                              {formatCurrency(d.earnings)}
+                            </span>
+                          </div>
+                        ))}
+                        <div style={{
+                          display: "flex", justifyContent: "space-between",
+                          padding: "8px 0 0", marginTop: 4, fontWeight: 700, fontSize: 14,
+                        }}>
+                          <span style={{ color: "#374151" }}>Total Proventos</span>
+                          <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#16A34A" }}>
+                            {formatCurrency(selectedPaycheck.extracted_gross_value)}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Descontos */}
+                    {deductions.length > 0 && (
+                      <div style={{ marginBottom: 16 }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#DC2626", marginBottom: 8 }}>
+                          Descontos
+                        </div>
+                        {deductions.map((d, i) => (
+                          <div key={i} style={{
+                            display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13,
+                            borderBottom: i < deductions.length - 1 ? "1px solid #E5E2DB" : "none",
+                          }}>
+                            <span style={{ color: "#374151" }}>
+                              {d.description}
+                              {d.reference && <span style={{ color: "#9CA3AF", marginLeft: 6, fontSize: 11 }}>({d.reference})</span>}
+                            </span>
+                            <span style={{ fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", color: "#DC2626" }}>
+                              − {formatCurrency(d.deductions)}
+                            </span>
+                          </div>
+                        ))}
+                        <div style={{
+                          display: "flex", justifyContent: "space-between",
+                          padding: "8px 0 0", marginTop: 4, fontWeight: 700, fontSize: 14,
+                        }}>
+                          <span style={{ color: "#374151" }}>Total Descontos</span>
+                          <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#DC2626" }}>
+                            − {formatCurrency(selectedPaycheck.extracted_deductions)}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Fallback simples se não tem details */}
+                    {details.length === 0 && (
+                      <>
+                        <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #E5E2DB", fontSize: 14 }}>
+                          <span>Salário Bruto</span>
+                          <span style={{ fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>
+                            {formatCurrency(selectedPaycheck.extracted_gross_value)}
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #E5E2DB", fontSize: 14 }}>
+                          <span>Descontos</span>
+                          <span style={{ fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: "#DC2626" }}>
+                            − {formatCurrency(selectedPaycheck.extracted_deductions)}
+                          </span>
+                        </div>
+                      </>
+                    )}
+
+                    {/* Ajustes escola */}
+                    {selectedAdjustments.length > 0 && (
+                      <div style={{ marginTop: 16, paddingTop: 16, borderTop: "2px dashed #E5E2DB" }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#F59E0B", marginBottom: 8 }}>
+                          Ajustes Adicionais
+                        </div>
+                        {selectedAdjustments.map((adj) => (
+                          <div key={adj.id} style={{
+                            display: "flex", justifyContent: "space-between", alignItems: "center",
+                            padding: "6px 0", fontSize: 13,
+                          }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <span style={{
+                                width: 20, height: 20, borderRadius: "50%",
+                                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                                fontSize: 12, fontWeight: 700,
+                                background: adj.type === "addition" ? "#22C55E" : "#EF4444", color: "#fff",
+                              }}>{adj.type === "addition" ? "+" : "−"}</span>
+                              <span style={{ color: "#374151" }}>{adj.description}</span>
+                              {!["sent", "skipped"].includes(selectedPaycheck.status) && (
+                                <button onClick={(e) => { e.stopPropagation(); removeAdjustment(adj.id); }} style={{
+                                  background: "none", border: "none", cursor: "pointer",
+                                  color: "#D1D5DB", fontSize: 14, padding: "0 4px",
+                                }}>✕</button>
+                              )}
+                            </div>
+                            <span style={{
+                              fontWeight: 600, fontFamily: "'JetBrains Mono', monospace",
+                              color: adj.type === "addition" ? "#16A34A" : "#DC2626",
+                            }}>
+                              {adj.type === "addition" ? "+" : "−"} {formatCurrency(adj.value)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Total */}
+                    <div style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                      padding: "16px 0 0", marginTop: 16, borderTop: "2px solid #1B2A4A",
+                    }}>
+                      <span style={{ fontSize: 16, fontWeight: 700, color: "#1B2A4A" }}>Total a Receber</span>
+                      <span style={{
+                        fontSize: 26, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace",
+                        color: getTotal(selectedPaycheck) >= 0 ? "#16A34A" : "#DC2626",
+                      }}>{formatCurrency(getTotal(selectedPaycheck))}</span>
                     </div>
                   </div>
-                )}
 
-                <div style={{
-                  display: "flex", justifyContent: "space-between", alignItems: "center",
-                  padding: "16px 0 0", marginTop: 16, borderTop: "2px solid #1B2A4A",
-                }}>
-                  <span style={{ fontSize: 16, fontWeight: 700, color: "#1B2A4A" }}>Total a Receber</span>
-                  <span style={{
-                    fontSize: 26, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace",
-                    color: getTotal(selectedPaycheck) >= 0 ? "#16A34A" : "#DC2626",
-                  }}>{formatCurrency(getTotal(selectedPaycheck))}</span>
+                  {/* Attachment */}
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: 12,
+                    padding: "12px 16px", borderRadius: 8,
+                    background: "#F0F9FF", border: "1px solid #BAE6FD", marginBottom: 24,
+                  }}>
+                    <span style={{ fontSize: 24 }}>📎</span>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#0369A1" }}>
+                        contracheque_{selectedCollaborator?.employee_code}_{periodLabel.replace(/ /g, "_")}.pdf
+                      </div>
+                      <div style={{ fontSize: 11, color: "#7DD3FC" }}>Página individual do contracheque</div>
+                    </div>
+                  </div>
+
+                  {/* Footer */}
+                  <div style={{
+                    borderTop: "1px solid #E5E2DB", paddingTop: 16,
+                    fontSize: 12, color: "#9CA3AF", textAlign: "center", lineHeight: 1.6,
+                  }}>
+                    <p style={{ margin: 0 }}>Este e-mail foi enviado automaticamente pelo sistema de folha de pagamento.</p>
+                    <p style={{ margin: "4px 0 0" }}>Em caso de dúvidas, entre em contato com o RH.</p>
+                  </div>
                 </div>
               </div>
 
-              {/* Add Adjustment */}
-              {selectedPaycheck.status !== "sent" && (
-                <div style={{
-                  background: "#fff", borderRadius: 16, padding: 24,
-                  border: "1px solid #E5E2DB", marginBottom: 20,
-                }}>
-                  <div style={{
-                    fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-                    letterSpacing: 1, color: "#9CA3AF", marginBottom: 16,
-                  }}>Adicionar Ajuste</div>
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <div style={{ display: "flex" }}>
-                      {[
-                        { key: "addition", label: "+ Adicional", color: "#22C55E" },
-                        { key: "deduction", label: "− Desconto", color: "#EF4444" },
-                      ].map((t, i) => (
-                        <button key={t.key}
-                          onClick={() => setNewAdj((p) => ({ ...p, type: t.key }))}
+              {/* ===== ACTIONS (fora do email) ===== */}
+              {!["sent"].includes(selectedPaycheck.status) && (
+                <div style={{ marginTop: 20 }}>
+                  {/* Add adjustment */}
+                  {!["skipped"].includes(selectedPaycheck.status) && (
+                    <div style={{
+                      background: "#fff", borderRadius: 12, padding: "16px 20px",
+                      border: "1px solid #D1D5DB", marginBottom: 12,
+                    }}>
+                      <div style={{
+                        fontSize: 11, fontWeight: 600, textTransform: "uppercase",
+                        letterSpacing: 1, color: "#9CA3AF", marginBottom: 12,
+                      }}>Adicionar Ajuste</div>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <div style={{ display: "flex" }}>
+                          {[
+                            { key: "addition", label: "+ Adicional", color: "#22C55E" },
+                            { key: "deduction", label: "− Desconto", color: "#EF4444" },
+                          ].map((t, i) => (
+                            <button key={t.key}
+                              onClick={() => setNewAdj((p) => ({ ...p, type: t.key }))}
+                              style={{
+                                padding: "7px 12px",
+                                borderRadius: i === 0 ? "8px 0 0 8px" : "0 8px 8px 0",
+                                fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                border: `1px solid ${newAdj.type === t.key ? t.color : "#E5E2DB"}`,
+                                background: newAdj.type === t.key ? t.color : "#fff",
+                                color: newAdj.type === t.key ? "#fff" : "#6B7280",
+                              }}>{t.label}</button>
+                          ))}
+                        </div>
+                        <select value={newAdj.category}
+                          onChange={(e) => setNewAdj((p) => ({ ...p, category: e.target.value }))}
                           style={{
-                            padding: "8px 14px",
-                            borderRadius: i === 0 ? "8px 0 0 8px" : "0 8px 8px 0",
-                            fontSize: 13, fontWeight: 600, cursor: "pointer",
-                            border: `1px solid ${newAdj.type === t.key ? t.color : "#E5E2DB"}`,
-                            background: newAdj.type === t.key ? t.color : "#fff",
-                            color: newAdj.type === t.key ? "#fff" : "#6B7280",
-                          }}>{t.label}</button>
-                      ))}
+                            padding: "7px 8px", borderRadius: 8,
+                            border: "1px solid #E5E2DB", fontSize: 12, outline: "none",
+                          }}>
+                          {ADJUSTMENT_CATEGORIES.map((c) => (
+                            <option key={c.value} value={c.value}>{c.label}</option>
+                          ))}
+                        </select>
+                        <input type="text" placeholder="Descrição"
+                          value={newAdj.description}
+                          onChange={(e) => setNewAdj((p) => ({ ...p, description: e.target.value }))}
+                          style={{
+                            flex: 1, minWidth: 120, padding: "7px 10px", borderRadius: 8,
+                            border: "1px solid #E5E2DB", fontSize: 12, outline: "none",
+                          }}
+                        />
+                        <input type="number" placeholder="R$" step="0.01"
+                          value={newAdj.value}
+                          onChange={(e) => setNewAdj((p) => ({ ...p, value: e.target.value }))}
+                          style={{
+                            width: 90, padding: "7px 10px", borderRadius: 8,
+                            border: "1px solid #E5E2DB", fontSize: 12, outline: "none",
+                            fontFamily: "'JetBrains Mono', monospace",
+                          }}
+                        />
+                        <button onClick={addAdjustment} style={{
+                          padding: "7px 16px", borderRadius: 8,
+                          background: "#F59E0B", color: "#fff",
+                          border: "none", cursor: "pointer", fontSize: 12, fontWeight: 700,
+                        }}>Adicionar</button>
+                      </div>
                     </div>
-                    <select value={newAdj.category}
-                      onChange={(e) => setNewAdj((p) => ({ ...p, category: e.target.value }))}
-                      style={{
-                        padding: "8px 10px", borderRadius: 8,
-                        border: "1px solid #E5E2DB", fontSize: 13, outline: "none",
-                      }}>
-                      {ADJUSTMENT_CATEGORIES.map((c) => (
-                        <option key={c.value} value={c.value}>{c.label}</option>
-                      ))}
-                    </select>
-                    <input type="text" placeholder="Descrição"
-                      value={newAdj.description}
-                      onChange={(e) => setNewAdj((p) => ({ ...p, description: e.target.value }))}
-                      style={{
-                        flex: 1, minWidth: 150, padding: "8px 12px", borderRadius: 8,
-                        border: "1px solid #E5E2DB", fontSize: 13, outline: "none",
-                      }}
-                    />
-                    <input type="number" placeholder="R$" step="0.01"
-                      value={newAdj.value}
-                      onChange={(e) => setNewAdj((p) => ({ ...p, value: e.target.value }))}
-                      style={{
-                        width: 100, padding: "8px 12px", borderRadius: 8,
-                        border: "1px solid #E5E2DB", fontSize: 13, outline: "none",
-                        fontFamily: "'JetBrains Mono', monospace",
-                      }}
-                    />
-                    <button onClick={addAdjustment} style={{
-                      padding: "8px 20px", borderRadius: 8,
-                      background: "#F59E0B", color: "#fff",
-                      border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700,
-                    }}>Adicionar</button>
-                  </div>
-                </div>
-              )}
+                  )}
 
-              {/* Actions */}
-              {selectedPaycheck.status !== "sent" && (
-                <div style={{ display: "flex", gap: 12 }}>
-                  {["extracted", "pending_review"].includes(selectedPaycheck.status) ? (
-                    <button onClick={validatePaycheck} style={{
-                      flex: 1, padding: "14px 24px", borderRadius: 12,
-                      background: "linear-gradient(135deg, #22C55E, #16A34A)",
-                      color: "#fff", border: "none", cursor: "pointer",
-                      fontSize: 15, fontWeight: 700,
-                      display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                      boxShadow: "0 4px 12px rgba(34,197,94,0.3)",
-                    }}>✓ Validar e Próximo</button>
-                  ) : selectedPaycheck.status === "reviewed" ? (
-                    <button onClick={unvalidatePaycheck} style={{
-                      flex: 1, padding: "14px 24px", borderRadius: 12,
-                      background: "#fff", color: "#F59E0B",
-                      border: "2px solid #F59E0B", cursor: "pointer",
-                      fontSize: 15, fontWeight: 700,
-                      display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                    }}>↩ Reabrir para Edição</button>
-                  ) : null}
+                  {/* Buttons */}
+                  <div style={{ display: "flex", gap: 10 }}>
+                    {["extracted", "pending_review"].includes(selectedPaycheck.status) && (
+                      <>
+                        <button onClick={validatePaycheck} style={{
+                          flex: 1, padding: "13px 20px", borderRadius: 10,
+                          background: "linear-gradient(135deg, #22C55E, #16A34A)",
+                          color: "#fff", border: "none", cursor: "pointer",
+                          fontSize: 14, fontWeight: 700,
+                          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                          boxShadow: "0 4px 12px rgba(34,197,94,0.3)",
+                        }}>✓ Validar E-mail e Próximo</button>
+                        <button onClick={skipPaycheck} style={{
+                          padding: "13px 20px", borderRadius: 10,
+                          background: "#fff", color: "#6B7280",
+                          border: "2px solid #D1D5DB", cursor: "pointer",
+                          fontSize: 14, fontWeight: 600,
+                          display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                        }}>🚫 Não Enviar</button>
+                      </>
+                    )}
+                    {selectedPaycheck.status === "reviewed" && (
+                      <button onClick={unvalidatePaycheck} style={{
+                        flex: 1, padding: "13px 20px", borderRadius: 10,
+                        background: "#fff", color: "#F59E0B",
+                        border: "2px solid #F59E0B", cursor: "pointer",
+                        fontSize: 14, fontWeight: 700,
+                        display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                      }}>↩ Reabrir para Edição</button>
+                    )}
+                    {selectedPaycheck.status === "skipped" && (
+                      <button onClick={unvalidatePaycheck} style={{
+                        flex: 1, padding: "13px 20px", borderRadius: 10,
+                        background: "#fff", color: "#3B82F6",
+                        border: "2px solid #3B82F6", cursor: "pointer",
+                        fontSize: 14, fontWeight: 700,
+                        display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                      }}>↩ Reativar Envio</button>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -880,7 +1045,6 @@ export default function PayrollApp() {
     </div>
   );
 }
-
 
 
 
