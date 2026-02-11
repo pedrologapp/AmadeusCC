@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 
 // ============================================================
 // CONFIGURAÇÃO - Altere estas URLs para as suas
@@ -9,6 +9,8 @@ const CONFIG = {
   N8N_WEBHOOK_PROCESS_PDF: "https://webhook.escolaamadeus.com/webhook/process-payroll-pdf",
   N8N_WEBHOOK_SEND_EMAILS: "https://seu-n8n.com/webhook/send-payroll-emails",
 };
+
+
 
 // ============================================================
 // Cliente Supabase simplificado (sem SDK)
@@ -1165,11 +1167,6 @@ export default function PayrollApp() {
     </div>
   );
 }
-
-
-
-
-
 
 
 
