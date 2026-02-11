@@ -267,25 +267,43 @@ export default function PayrollApp() {
 
       if (result.period_id) setCurrentPeriodId(result.period_id);
 
+      const searchMonth = String(refMonth);
+      const searchYear = String(refYear);
+
       let attempts = 0;
       const poll = setInterval(async () => {
         attempts++;
-        await loadPeriods();
-        await loadPaychecks();
         setUploadProgress(`Processando... (verificação ${attempts})`);
 
         if (attempts > 60) {
           clearInterval(poll);
           setUploadProgress("Processamento demorou mais que o esperado. Recarregue a página.");
           setUploading(false);
+          return;
         }
 
-        const updated = await supabase.select("payroll_periods", `id=eq.${result.period_id || currentPeriodId}`);
-        if (updated[0] && updated[0].status !== "processing") {
-          clearInterval(poll);
-          await loadPaychecks();
-          setUploadProgress("");
-          setUploading(false);
+        try {
+          // Buscar período por mês/ano (funciona mesmo sem period_id do webhook)
+          const periods = await supabase.select(
+            "payroll_periods",
+            `reference_month=eq.${searchMonth}&reference_year=eq.${searchYear}`,
+            "created_at.desc"
+          );
+
+          if (periods.length > 0) {
+            const period = periods[0];
+            setCurrentPeriodId(period.id);
+
+            if (period.status !== "processing") {
+              clearInterval(poll);
+              await loadPeriods();
+              await loadPaychecks();
+              setUploadProgress("");
+              setUploading(false);
+            }
+          }
+        } catch (err) {
+          console.error("Erro no polling:", err);
         }
       }, 5000);
     } catch (err) {
@@ -862,6 +880,7 @@ export default function PayrollApp() {
     </div>
   );
 }
+
 
 
 
