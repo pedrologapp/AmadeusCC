@@ -4,13 +4,12 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 // CONFIGURAÇÃO - Altere estas URLs para as suas
 // ============================================================
 const CONFIG = {
-  SUPABASE_URL: "https://lzqhjutknqeuhscfxald.supabase.co",
-  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx6cWhqdXRrbnFldWhzY2Z4YWxkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM4OTY0ODgsImV4cCI6MjA2OTQ3MjQ4OH0.AtiXJ2BpmulSUXo--bz_jKu0esAyS71kF33nWNE1YHk",
+  SUPABASE_URL: "https://SEU-PROJETO.supabase.co",
+  SUPABASE_ANON_KEY: "COLE_SUA_ANON_KEY_AQUI",
   N8N_WEBHOOK_PROCESS_PDF: "https://webhook.escolaamadeus.com/webhook/process-payroll-pdf",
-  N8N_WEBHOOK_SEND_EMAILS: "https://webhook.escolaamadeus.com/webhook/send-payroll-emails",
+  N8N_WEBHOOK_SEND_EMAILS: "https://seu-n8n.com/webhook/send-payroll-emails",
+  SCHOOL_NAME: "Escola Amadeus",
 };
-
-
 
 // ============================================================
 // Cliente Supabase simplificado (sem SDK)
@@ -1122,12 +1121,13 @@ export default function PayrollApp() {
                           display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
                           boxShadow: "0 4px 12px rgba(34,197,94,0.3)",
                         }}>✓ Validar E-mail e Próximo</button>
-                        <button onClick={skipPaycheck} style={{
-                          padding: "13px 20px", borderRadius: 10,
+                        <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); skipPaycheck(); }} style={{
+                          padding: "13px 24px", borderRadius: 10,
                           background: "#fff", color: "#6B7280",
                           border: "2px solid #D1D5DB", cursor: "pointer",
                           fontSize: 14, fontWeight: 600,
                           display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                          minWidth: 160, position: "relative", zIndex: 10,
                         }}>🚫 Não Enviar</button>
                       </>
                     )}
@@ -1167,16 +1167,6 @@ export default function PayrollApp() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
 
 
 
