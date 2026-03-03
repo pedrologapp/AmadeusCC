@@ -4,10 +4,10 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 // CONFIGURAÇÃO - Altere estas URLs para as suas
 // ============================================================
 const CONFIG = {
-  SUPABASE_URL: "https://SEU-PROJETO.supabase.co",
-  SUPABASE_ANON_KEY: "COLE_SUA_ANON_KEY_AQUI",
+  SUPABASE_URL: "https://lzqhjutknqeuhscfxald.supabase.co",
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx6cWhqdXRrbnFldWhzY2Z4YWxkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM4OTY0ODgsImV4cCI6MjA2OTQ3MjQ4OH0.AtiXJ2BpmulSUXo--bz_jKu0esAyS71kF33nWNE1YHk",
   N8N_WEBHOOK_PROCESS_PDF: "https://webhook.escolaamadeus.com/webhook/process-payroll-pdf",
-  N8N_WEBHOOK_SEND_EMAILS: "https://seu-n8n.com/webhook/send-payroll-emails",
+  N8N_WEBHOOK_SEND_EMAILS: "https://webhook.escolaamadeus.com/webhook/send-payroll-emails",
   SCHOOL_NAME: "Escola Amadeus",
 };
 
@@ -1167,13 +1167,6 @@ export default function PayrollApp() {
     </div>
   );
 }
-
-
-
-
-
-
-
 
 
 
