@@ -566,7 +566,7 @@ export default function PayrollApp() {
 
   // PDF URL agora usa o path individual salvo no contracheque
   const pdfUrl = selectedPaycheck?.individual_pdf_path
-    ? `${CONFIG.SUPABASE_URL}/storage/v1/object/public/${selectedPaycheck.individual_pdf_path}`
+    ? `https://cc.escolaamadeus.com/api/split-pdf?url=${encodeURIComponent(CONFIG.SUPABASE_URL + '/storage/v1/object/public/' + selectedPaycheck.individual_pdf_path)}&pages=${selectedPaycheck.page_numbers ? selectedPaycheck.page_numbers.join(',') : (selectedPaycheck.pdf_page_number || 1)}`
     : null;
 
   const details = selectedPaycheck ? getExtractedDetails(selectedPaycheck) : [];
@@ -1203,6 +1203,7 @@ export default function PayrollApp() {
     </div>
   );
 }
+
 
 
 
