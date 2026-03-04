@@ -649,7 +649,7 @@ export default function PayrollApp() {
             }}>✕</button>
           </div>
           <div style={{ fontSize: 12, color: "#A16207" }}>
-            {duplicateWarnings.map((w) => w.collaborator).filter(Boolean).join(", ")}
+            {[...new Set(duplicateWarnings.map((w) => w.collaborator).filter(Boolean))].join(", ")}
           </div>
         </div>
       )}
@@ -1203,6 +1203,7 @@ export default function PayrollApp() {
     </div>
   );
 }
+
 
 
 
