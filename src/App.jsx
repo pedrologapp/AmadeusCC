@@ -206,6 +206,10 @@ export default function PayrollApp() {
   const [selectedCollabId, setSelectedCollabId] = useState(null);
   const [presetSearch, setPresetSearch] = useState("");
   const [newPreset, setNewPreset] = useState({ type: "addition", description: "", value: "", category: "other" });
+
+  // Preset preview state
+  const [showPresetPreview, setShowPresetPreview] = useState(false);
+  const [editablePresets, setEditablePresets] = useState([]);
   const [applyingPresets, setApplyingPresets] = useState(false);
 
   const currentPeriod = periods.find((p) => p.id === currentPeriodId);
@@ -236,7 +240,6 @@ export default function PayrollApp() {
     c.full_name.toLowerCase().includes(presetSearch.toLowerCase()) ||
     (c.role || "").toLowerCase().includes(presetSearch.toLowerCase())
   );
-
   const presetTotalAdd = selectedPresets.filter(p => p.type === 'addition').reduce((s, p) => s + p.value, 0);
   const presetTotalDed = selectedPresets.filter(p => p.type === 'deduction').reduce((s, p) => s + p.value, 0);
 
@@ -244,18 +247,11 @@ export default function PayrollApp() {
   // Data Loading
   // ============================================================
   const loadCollaborators = useCallback(async () => {
-    try {
-      const data = await supabase.select("collaborators", "is_active=eq.true", "full_name.asc");
-      setCollaborators(data);
-    } catch (err) { console.error("Erro ao carregar colaboradores:", err); }
+    try { const data = await supabase.select("collaborators", "is_active=eq.true", "full_name.asc"); setCollaborators(data); } catch (err) { console.error(err); }
   }, []);
 
   const loadPeriods = useCallback(async () => {
-    try {
-      const data = await supabase.select("payroll_periods", "", "reference_year.desc,reference_month.desc");
-      setPeriods(data);
-      return data;
-    } catch (err) { console.error("Erro ao carregar períodos:", err); return []; }
+    try { const data = await supabase.select("payroll_periods", "", "reference_year.desc,reference_month.desc"); setPeriods(data); return data; } catch (err) { console.error(err); return []; }
   }, []);
 
   const loadPaychecks = useCallback(async (periodId) => {
@@ -270,19 +266,16 @@ export default function PayrollApp() {
         adjMap[pc.id] = adjs;
       }
       setAdjustments(adjMap);
-    } catch (err) { console.error("Erro ao carregar contracheques:", err); }
+    } catch (err) { console.error(err); }
   }, [currentPeriodId]);
 
   const loadPresets = useCallback(async () => {
     try {
       const data = await supabase.select("collaborator_presets", "", "created_at.asc");
       const map = {};
-      for (const p of data) {
-        if (!map[p.collaborator_id]) map[p.collaborator_id] = [];
-        map[p.collaborator_id].push(p);
-      }
+      for (const p of data) { if (!map[p.collaborator_id]) map[p.collaborator_id] = []; map[p.collaborator_id].push(p); }
       setPresets(map);
-    } catch (err) { console.error("Erro ao carregar presets:", err); }
+    } catch (err) { console.error(err); }
   }, []);
 
   useEffect(() => {
@@ -291,11 +284,7 @@ export default function PayrollApp() {
       await loadCollaborators();
       const data = await loadPeriods();
       await loadPresets();
-      if (data.length > 0) {
-        setCurrentPeriodId(data[0].id);
-        setRefMonth(data[0].reference_month);
-        setRefYear(data[0].reference_year);
-      }
+      if (data.length > 0) { setCurrentPeriodId(data[0].id); setRefMonth(data[0].reference_month); setRefYear(data[0].reference_year); }
       setLoading(false);
     };
     init();
@@ -321,19 +310,16 @@ export default function PayrollApp() {
     setUploading(true); setUploadProgress("Enviando PDF para processamento..."); setError(null); setDuplicateWarnings([]);
     try {
       const formData = new FormData();
-      formData.append("file", file);
-      formData.append("reference_month", String(refMonth));
-      formData.append("reference_year", String(refYear));
+      formData.append("file", file); formData.append("reference_month", String(refMonth)); formData.append("reference_year", String(refYear));
       const res = await fetch(CONFIG.N8N_WEBHOOK_PROCESS_PDF, { method: "POST", body: formData });
-      if (!res.ok) throw new Error("Erro ao enviar PDF para o n8n");
+      if (!res.ok) throw new Error("Erro ao enviar PDF");
       await res.json();
       setUploadProgress("PDF enviado! A IA está processando...");
       const sm = String(refMonth); const sy = String(refYear);
       let attempts = 0;
       const poll = setInterval(async () => {
-        attempts++;
-        setUploadProgress(`Processando... (verificação ${attempts})`);
-        if (attempts > 60) { clearInterval(poll); setUploadProgress("Processamento demorou mais que o esperado. Recarregue a página."); setUploading(false); return; }
+        attempts++; setUploadProgress(`Processando... (verificação ${attempts})`);
+        if (attempts > 60) { clearInterval(poll); setUploadProgress("Processamento demorou. Recarregue a página."); setUploading(false); return; }
         try {
           const found = await supabase.select("payroll_periods", `reference_month=eq.${sm}&reference_year=eq.${sy}`, "created_at.desc");
           if (found.length > 0 && found[0].status !== "processing") {
@@ -346,7 +332,7 @@ export default function PayrollApp() {
             } catch (e) {}
             setUploadProgress(""); setUploading(false);
           }
-        } catch (err) { console.error("Erro no polling:", err); }
+        } catch (err) { console.error(err); }
       }, 5000);
     } catch (err) { setError(`Erro: ${err.message}`); setUploading(false); setUploadProgress(""); }
   };
@@ -363,7 +349,7 @@ export default function PayrollApp() {
   };
 
   const removeAdjustment = async (adjId) => {
-    try { await supabase.delete("adjustments", adjId); await loadPaychecks(); } catch (err) { setError(`Erro ao remover ajuste: ${err.message}`); }
+    try { await supabase.delete("adjustments", adjId); await loadPaychecks(); } catch (err) { setError(`Erro: ${err.message}`); }
   };
 
   const validatePaycheck = async () => {
@@ -374,7 +360,7 @@ export default function PayrollApp() {
       const idx = filteredPaychecks.findIndex((p) => p.id === selectedPaycheckId);
       const next = filteredPaychecks[idx + 1];
       if (next) setSelectedPaycheckId(next.id);
-    } catch (err) { setError(`Erro ao validar: ${err.message}`); }
+    } catch (err) { setError(`Erro: ${err.message}`); }
   };
 
   const skipPaycheck = async () => {
@@ -398,25 +384,30 @@ export default function PayrollApp() {
     setSending(true); setError(null);
     try {
       const res = await fetch(CONFIG.N8N_WEBHOOK_SEND_EMAILS, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ period_id: currentPeriodId }) });
-      if (!res.ok) throw new Error("Erro ao disparar envio de e-mails");
-      const poll = setInterval(async () => {
-        await loadPaychecks();
-        const remaining = paychecks.filter((p) => p.status === "reviewed").length;
-        if (remaining === 0) { clearInterval(poll); setSending(false); }
-      }, 3000);
+      if (!res.ok) throw new Error("Erro ao disparar envio");
+      const poll = setInterval(async () => { await loadPaychecks(); const remaining = paychecks.filter((p) => p.status === "reviewed").length; if (remaining === 0) { clearInterval(poll); setSending(false); } }, 3000);
       setTimeout(() => { clearInterval(poll); setSending(false); }, 120000);
     } catch (err) { setError(`Erro: ${err.message}`); setSending(false); }
   };
 
-  // Apply presets to a paycheck
-  const applyPresetsToPaycheck = async () => {
-    if (!selectedPaycheckId || !selectedPaycheck) return;
+  // Open preset preview for editing before applying
+  const openPresetPreview = () => {
+    if (!selectedPaycheck) return;
     const collabId = selectedPaycheck.collaborator_id;
     const collabPresets = (presets[collabId] || []).filter(p => p.is_active);
-    if (collabPresets.length === 0) { setError("Nenhum preset configurado para este colaborador. Configure na aba Proventos."); return; }
+    if (collabPresets.length === 0) { setError("Nenhum preset configurado. Configure na aba Proventos."); return; }
+    setEditablePresets(collabPresets.map(p => ({ ...p, _enabled: true })));
+    setShowPresetPreview(true);
+  };
+
+  // Actually apply the edited presets
+  const confirmApplyPresets = async () => {
+    if (!selectedPaycheckId) return;
+    const toApply = editablePresets.filter(p => p._enabled);
+    if (toApply.length === 0) { setShowPresetPreview(false); return; }
     setApplyingPresets(true);
     try {
-      for (const preset of collabPresets) {
+      for (const preset of toApply) {
         await supabase.insert("adjustments", {
           paycheck_id: selectedPaycheckId,
           type: preset.type,
@@ -426,8 +417,25 @@ export default function PayrollApp() {
         });
       }
       await loadPaychecks();
+      setShowPresetPreview(false);
       setApplyingPresets(false);
-    } catch (err) { setError(`Erro ao aplicar presets: ${err.message}`); setApplyingPresets(false); }
+    } catch (err) { setError(`Erro ao aplicar: ${err.message}`); setApplyingPresets(false); }
+  };
+
+  const updateEditablePreset = (index, field, value) => {
+    setEditablePresets(prev => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], [field]: field === 'value' ? parseFloat(value) || 0 : value };
+      return updated;
+    });
+  };
+
+  const toggleEditablePreset = (index) => {
+    setEditablePresets(prev => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], _enabled: !updated[index]._enabled };
+      return updated;
+    });
   };
 
   const getTotal = (pc) => {
@@ -456,11 +464,11 @@ export default function PayrollApp() {
       });
       setNewPreset({ type: "addition", description: "", value: "", category: "other" });
       await loadPresets();
-    } catch (err) { setError(`Erro ao adicionar preset: ${err.message}`); }
+    } catch (err) { setError(`Erro: ${err.message}`); }
   };
 
   const removePreset = async (presetId) => {
-    try { await supabase.delete("collaborator_presets", presetId); await loadPresets(); } catch (err) { setError(`Erro ao remover preset: ${err.message}`); }
+    try { await supabase.delete("collaborator_presets", presetId); await loadPresets(); } catch (err) { setError(`Erro: ${err.message}`); }
   };
 
   const togglePreset = async (preset) => {
@@ -484,9 +492,12 @@ export default function PayrollApp() {
   const details = selectedPaycheck ? getExtractedDetails(selectedPaycheck) : [];
   const earnings = details.filter((d) => d.earnings > 0);
   const deductions = details.filter((d) => d.deductions > 0);
-
-  // Check if selected paycheck has presets available
   const paycheckCollabPresets = selectedPaycheck ? (presets[selectedPaycheck.collaborator_id] || []).filter(p => p.is_active) : [];
+
+  // Preview totals
+  const previewEnabled = editablePresets.filter(p => p._enabled);
+  const previewTotalAdd = previewEnabled.filter(p => p.type === 'addition').reduce((s, p) => s + (p.value || 0), 0);
+  const previewTotalDed = previewEnabled.filter(p => p.type === 'deduction').reduce((s, p) => s + (p.value || 0), 0);
 
   return (
     <div style={{ minHeight: "100vh", background: "#F8F7F4", fontFamily: "'Outfit', 'Segoe UI', sans-serif", color: "#1a1a1a" }}>
@@ -506,15 +517,10 @@ export default function PayrollApp() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {/* Tabs */}
           <div style={{ display: "flex", background: "rgba(255,255,255,0.1)", borderRadius: 8, padding: 2 }}>
-            {[
-              { key: "contracheques", label: "📋 Contracheques" },
-              { key: "proventos", label: "💰 Proventos" },
-            ].map((tab) => (
+            {[{ key: "contracheques", label: "📋 Contracheques" }, { key: "proventos", label: "💰 Proventos" }].map((tab) => (
               <button key={tab.key} onClick={() => setActiveTab(tab.key)} style={{
-                padding: "6px 14px", borderRadius: 6, fontSize: 12, fontWeight: 600,
-                border: "none", cursor: "pointer",
+                padding: "6px 14px", borderRadius: 6, fontSize: 12, fontWeight: 600, border: "none", cursor: "pointer",
                 background: activeTab === tab.key ? "rgba(255,255,255,0.2)" : "transparent",
                 color: activeTab === tab.key ? "#fff" : "rgba(255,255,255,0.6)",
               }}>{tab.label}</button>
@@ -543,6 +549,133 @@ export default function PayrollApp() {
             <button onClick={() => setDuplicateWarnings([])} style={{ background: "none", border: "none", color: "#92400E", cursor: "pointer", fontSize: 16 }}>✕</button>
           </div>
           <div style={{ fontSize: 12, color: "#A16207" }}>{[...new Set(duplicateWarnings.map((w) => w.collaborator).filter(Boolean))].join(", ")}</div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* PRESET PREVIEW MODAL */}
+      {/* ============================================================ */}
+      {showPresetPreview && (
+        <div style={{
+          position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+          background: "rgba(0,0,0,0.5)", zIndex: 200,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }} onClick={() => setShowPresetPreview(false)}>
+          <div style={{
+            background: "#fff", borderRadius: 16, width: 560, maxHeight: "80vh",
+            overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+          }} onClick={(e) => e.stopPropagation()}>
+            {/* Modal Header */}
+            <div style={{ padding: "20px 24px", borderBottom: "1px solid #E5E2DB", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#1B2A4A" }}>Revisar Presets antes de Aplicar</div>
+                <div style={{ fontSize: 12, color: "#6B7280", marginTop: 2 }}>{selectedCollaborator?.full_name} — Edite valores ou desmarque itens</div>
+              </div>
+              <button onClick={() => setShowPresetPreview(false)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#9CA3AF" }}>✕</button>
+            </div>
+
+            {/* Preset Items */}
+            <div style={{ padding: "16px 24px" }}>
+              {editablePresets.map((preset, idx) => (
+                <div key={idx} style={{
+                  display: "flex", alignItems: "center", gap: 10, padding: "12px 0",
+                  borderBottom: idx < editablePresets.length - 1 ? "1px solid #F3F0EB" : "none",
+                  opacity: preset._enabled ? 1 : 0.4,
+                }}>
+                  {/* Checkbox */}
+                  <button onClick={() => toggleEditablePreset(idx)} style={{
+                    width: 22, height: 22, borderRadius: 6, border: `2px solid ${preset._enabled ? "#3B82F6" : "#D1D5DB"}`,
+                    background: preset._enabled ? "#3B82F6" : "#fff", color: "#fff",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    cursor: "pointer", fontSize: 12, fontWeight: 700, flexShrink: 0,
+                  }}>{preset._enabled ? "✓" : ""}</button>
+
+                  {/* Type indicator */}
+                  <span style={{
+                    width: 24, height: 24, borderRadius: "50%", flexShrink: 0,
+                    display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 13, fontWeight: 700,
+                    background: preset.type === "addition" ? "#22C55E" : "#EF4444", color: "#fff",
+                  }}>{preset.type === "addition" ? "+" : "−"}</span>
+
+                  {/* Description (editable) */}
+                  <input type="text" value={preset.description}
+                    onChange={(e) => updateEditablePreset(idx, 'description', e.target.value)}
+                    disabled={!preset._enabled}
+                    style={{
+                      flex: 1, padding: "6px 10px", borderRadius: 6,
+                      border: "1px solid #E5E2DB", fontSize: 13, outline: "none",
+                      background: preset._enabled ? "#fff" : "#F9FAFB",
+                      color: "#374151",
+                    }}
+                  />
+
+                  {/* Category badge */}
+                  <span style={{ fontSize: 10, color: "#9CA3AF", background: "#F3F4F6", padding: "3px 6px", borderRadius: 4, flexShrink: 0 }}>
+                    {ADJUSTMENT_CATEGORIES.find(c => c.value === preset.category)?.label || preset.category}
+                  </span>
+
+                  {/* Value (editable) */}
+                  <div style={{ position: "relative", flexShrink: 0 }}>
+                    <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: "#9CA3AF" }}>R$</span>
+                    <input type="number" step="0.01" value={preset.value}
+                      onChange={(e) => updateEditablePreset(idx, 'value', e.target.value)}
+                      disabled={!preset._enabled}
+                      style={{
+                        width: 100, padding: "6px 10px 6px 30px", borderRadius: 6,
+                        border: "1px solid #E5E2DB", fontSize: 13, outline: "none",
+                        fontFamily: "'JetBrains Mono', monospace", textAlign: "right",
+                        background: preset._enabled ? "#fff" : "#F9FAFB",
+                        color: preset.type === "addition" ? "#16A34A" : "#DC2626",
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+
+              {/* Preview Totals */}
+              <div style={{ borderTop: "2px solid #1B2A4A", marginTop: 12, paddingTop: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 13 }}>
+                  <span style={{ color: "#6B7280" }}>{previewEnabled.length} de {editablePresets.length} selecionados</span>
+                </div>
+                {previewTotalAdd > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 13 }}>
+                    <span style={{ color: "#374151", fontWeight: 600 }}>Proventos</span>
+                    <span style={{ fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: "#16A34A" }}>+{formatCurrency(previewTotalAdd)}</span>
+                  </div>
+                )}
+                {previewTotalDed > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 13 }}>
+                    <span style={{ color: "#374151", fontWeight: 600 }}>Descontos</span>
+                    <span style={{ fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: "#DC2626" }}>−{formatCurrency(previewTotalDed)}</span>
+                  </div>
+                )}
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0 0", fontSize: 15, fontWeight: 700 }}>
+                  <span style={{ color: "#1B2A4A" }}>Impacto Total</span>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", color: (previewTotalAdd - previewTotalDed) >= 0 ? "#16A34A" : "#DC2626" }}>
+                    {(previewTotalAdd - previewTotalDed) >= 0 ? "+" : ""}{formatCurrency(previewTotalAdd - previewTotalDed)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div style={{ padding: "16px 24px", borderTop: "1px solid #E5E2DB", display: "flex", gap: 10 }}>
+              <button onClick={() => setShowPresetPreview(false)} style={{
+                flex: 1, padding: "11px 16px", borderRadius: 8, background: "#fff", color: "#6B7280",
+                border: "1px solid #D1D5DB", cursor: "pointer", fontSize: 13, fontWeight: 600,
+              }}>Cancelar</button>
+              <button onClick={confirmApplyPresets} disabled={applyingPresets || previewEnabled.length === 0} style={{
+                flex: 2, padding: "11px 16px", borderRadius: 8, color: "#fff", border: "none",
+                cursor: previewEnabled.length === 0 ? "default" : "pointer", fontSize: 13, fontWeight: 700,
+                background: previewEnabled.length === 0 ? "#9CA3AF" : "linear-gradient(135deg, #3B82F6, #1D4ED8)",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                boxShadow: previewEnabled.length > 0 ? "0 2px 8px rgba(59,130,246,0.3)" : "none",
+              }}>
+                {applyingPresets ? <><Spinner /> Aplicando...</> : <>✓ Aplicar {previewEnabled.length} Ajuste{previewEnabled.length !== 1 ? "s" : ""}</>}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -630,12 +763,8 @@ export default function PayrollApp() {
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
                       <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: "#1B2A4A" }}>{formatCurrency(getTotal(pc))}</span>
                       <div style={{ display: "flex", gap: 4 }}>
-                        {pcAdjs.length > 0 && (
-                          <span style={{ fontSize: 10, color: "#F59E0B", fontWeight: 600, background: "#FEF3C7", padding: "2px 6px", borderRadius: 4 }}>{pcAdjs.length} ajuste{pcAdjs.length > 1 ? "s" : ""}</span>
-                        )}
-                        {hasPresets && pcAdjs.length === 0 && ["extracted", "pending_review"].includes(pc.status) && (
-                          <span style={{ fontSize: 10, color: "#3B82F6", fontWeight: 600, background: "#DBEAFE", padding: "2px 6px", borderRadius: 4 }}>preset</span>
-                        )}
+                        {pcAdjs.length > 0 && <span style={{ fontSize: 10, color: "#F59E0B", fontWeight: 600, background: "#FEF3C7", padding: "2px 6px", borderRadius: 4 }}>{pcAdjs.length} ajuste{pcAdjs.length > 1 ? "s" : ""}</span>}
+                        {hasPresets && pcAdjs.length === 0 && ["extracted", "pending_review"].includes(pc.status) && <span style={{ fontSize: 10, color: "#3B82F6", fontWeight: 600, background: "#DBEAFE", padding: "2px 6px", borderRadius: 4 }}>preset</span>}
                       </div>
                     </div>
                   </div>
@@ -665,11 +794,14 @@ export default function PayrollApp() {
               </div>
             ) : (
               <div style={{ maxWidth: 680, margin: "0 auto" }}>
+                {/* Envelope */}
                 <div style={{ background: "#fff", borderRadius: "12px 12px 0 0", padding: "16px 24px", border: "1px solid #D1D5DB", borderBottom: "none", fontSize: 13, color: "#6B7280" }}>
                   <div style={{ display: "flex", gap: 8, marginBottom: 6 }}><span style={{ fontWeight: 600, color: "#374151", minWidth: 50 }}>Para:</span><span>{selectedCollaborator?.full_name} &lt;{selectedCollaborator?.email}&gt;</span></div>
                   <div style={{ display: "flex", gap: 8, marginBottom: 6 }}><span style={{ fontWeight: 600, color: "#374151", minWidth: 50 }}>De:</span><span>{CONFIG.SCHOOL_NAME} &lt;rh@escolaamadeus.com&gt;</span></div>
                   <div style={{ display: "flex", gap: 8 }}><span style={{ fontWeight: 600, color: "#374151", minWidth: 50 }}>Assunto:</span><span>Seu Contracheque — {periodLabel}</span></div>
                 </div>
+
+                {/* Email body */}
                 <div style={{ background: "#fff", border: "1px solid #D1D5DB", borderRadius: "0 0 12px 12px", overflow: "hidden" }}>
                   <div style={{ background: "#1B2A4A", padding: "24px 32px", color: "#fff", textAlign: "center" }}>
                     <div style={{ fontSize: 20, fontWeight: 700 }}>{CONFIG.SCHOOL_NAME}</div>
@@ -700,8 +832,7 @@ export default function PayrollApp() {
                             </div>
                           ))}
                           <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0 0", marginTop: 4, fontWeight: 700, fontSize: 14 }}>
-                            <span style={{ color: "#374151" }}>Total Proventos</span>
-                            <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#16A34A" }}>{formatCurrency(selectedPaycheck.extracted_gross_value)}</span>
+                            <span style={{ color: "#374151" }}>Total Proventos</span><span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#16A34A" }}>{formatCurrency(selectedPaycheck.extracted_gross_value)}</span>
                           </div>
                         </div>
                       )}
@@ -715,8 +846,7 @@ export default function PayrollApp() {
                             </div>
                           ))}
                           <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0 0", marginTop: 4, fontWeight: 700, fontSize: 14 }}>
-                            <span style={{ color: "#374151" }}>Total Descontos</span>
-                            <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#DC2626" }}>− {formatCurrency(selectedPaycheck.extracted_deductions)}</span>
+                            <span style={{ color: "#374151" }}>Total Descontos</span><span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#DC2626" }}>− {formatCurrency(selectedPaycheck.extracted_deductions)}</span>
                           </div>
                         </div>
                       )}
@@ -769,15 +899,13 @@ export default function PayrollApp() {
                   <div style={{ marginTop: 20 }}>
                     {/* Apply Presets Button */}
                     {paycheckCollabPresets.length > 0 && selectedAdjustments.length === 0 && !["skipped", "reviewed"].includes(selectedPaycheck.status) && (
-                      <button onClick={applyPresetsToPaycheck} disabled={applyingPresets} style={{
+                      <button onClick={openPresetPreview} style={{
                         width: "100%", padding: "10px 16px", borderRadius: 10, marginBottom: 12,
                         background: "linear-gradient(135deg, #3B82F6, #1D4ED8)", color: "#fff",
                         border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700,
                         display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
                         boxShadow: "0 2px 8px rgba(59,130,246,0.3)",
-                      }}>
-                        {applyingPresets ? <><Spinner /> Aplicando...</> : <>💰 Aplicar {paycheckCollabPresets.length} Preset{paycheckCollabPresets.length > 1 ? "s" : ""} Salvos</>}
-                      </button>
+                      }}>💰 Revisar e Aplicar {paycheckCollabPresets.length} Preset{paycheckCollabPresets.length > 1 ? "s" : ""}</button>
                     )}
 
                     {!["skipped"].includes(selectedPaycheck.status) && (
@@ -809,7 +937,7 @@ export default function PayrollApp() {
                       {["extracted", "pending_review"].includes(selectedPaycheck.status) && (
                         <>
                           <button onClick={validatePaycheck} style={{ flex: 1, padding: "13px 20px", borderRadius: 10, background: "linear-gradient(135deg, #22C55E, #16A34A)", color: "#fff", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, boxShadow: "0 4px 12px rgba(34,197,94,0.3)" }}>✓ Validar E-mail e Próximo</button>
-                          <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); skipPaycheck(); }} style={{ padding: "13px 24px", borderRadius: 10, background: "#fff", color: "#6B7280", border: "2px solid #D1D5DB", cursor: "pointer", fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, minWidth: 160, position: "relative", zIndex: 10 }}>🚫 Não Enviar</button>
+                          <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); skipPaycheck(); }} style={{ padding: "13px 24px", borderRadius: 10, background: "#fff", color: "#6B7280", border: "2px solid #D1D5DB", cursor: "pointer", fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, minWidth: 160 }}>🚫 Não Enviar</button>
                         </>
                       )}
                       {selectedPaycheck.status === "reviewed" && (
@@ -832,7 +960,6 @@ export default function PayrollApp() {
       {/* ============================================================ */}
       {activeTab === "proventos" && (
         <div style={{ display: "flex", height: "calc(100vh - 64px)" }}>
-          {/* LEFT - Collaborator List */}
           <div style={{ width: 380, borderRight: "1px solid #E5E2DB", display: "flex", flexDirection: "column", background: "#FFFFFF" }}>
             <div style={{ padding: "16px 20px", borderBottom: "1px solid #E5E2DB" }}>
               <div style={{ fontSize: 16, fontWeight: 700, color: "#1B2A4A", marginBottom: 10 }}>💰 Presets de Proventos</div>
@@ -855,11 +982,7 @@ export default function PayrollApp() {
                         <div style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A", marginBottom: 2 }}>{collab.full_name}</div>
                         <div style={{ fontSize: 11, color: "#6B7280" }}>{collab.role}</div>
                       </div>
-                      {presetCount > 0 && (
-                        <span style={{ fontSize: 10, color: "#3B82F6", fontWeight: 600, background: "#DBEAFE", padding: "3px 8px", borderRadius: 10 }}>
-                          {presetCount} preset{presetCount > 1 ? "s" : ""}
-                        </span>
-                      )}
+                      {presetCount > 0 && <span style={{ fontSize: 10, color: "#3B82F6", fontWeight: 600, background: "#DBEAFE", padding: "3px 8px", borderRadius: 10 }}>{presetCount} preset{presetCount > 1 ? "s" : ""}</span>}
                     </div>
                     {presetCount > 0 && (
                       <div style={{ marginTop: 6, fontSize: 12, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", color: totalVal >= 0 ? "#16A34A" : "#DC2626" }}>
@@ -872,7 +995,6 @@ export default function PayrollApp() {
             </div>
           </div>
 
-          {/* RIGHT - Preset Details */}
           <div style={{ flex: 1, overflowY: "auto", padding: 32, background: "#EDEAE5" }}>
             {!selectedPresetCollab ? (
               <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#9CA3AF" }}>
@@ -882,13 +1004,11 @@ export default function PayrollApp() {
               </div>
             ) : (
               <div style={{ maxWidth: 600, margin: "0 auto" }}>
-                {/* Header */}
                 <div style={{ background: "#fff", borderRadius: 12, padding: "20px 24px", border: "1px solid #D1D5DB", marginBottom: 16 }}>
                   <div style={{ fontSize: 18, fontWeight: 700, color: "#1B2A4A", marginBottom: 4 }}>{selectedPresetCollab.full_name}</div>
                   <div style={{ fontSize: 13, color: "#6B7280" }}>{selectedPresetCollab.role} • {selectedPresetCollab.email}</div>
                 </div>
 
-                {/* Add Preset */}
                 <div style={{ background: "#fff", borderRadius: 12, padding: "16px 20px", border: "1px solid #D1D5DB", marginBottom: 16 }}>
                   <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, color: "#9CA3AF", marginBottom: 12 }}>Adicionar Preset</div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -912,77 +1032,51 @@ export default function PayrollApp() {
                   </div>
                 </div>
 
-                {/* Preset List */}
                 <div style={{ background: "#fff", borderRadius: 12, padding: "20px 24px", border: "1px solid #D1D5DB" }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, color: "#9CA3AF", marginBottom: 16 }}>
-                    Presets Salvos ({selectedPresets.length})
-                  </div>
+                  <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, color: "#9CA3AF", marginBottom: 16 }}>Presets Salvos ({selectedPresets.length})</div>
 
                   {(presets[selectedCollabId] || []).length === 0 ? (
-                    <div style={{ padding: 20, textAlign: "center", color: "#9CA3AF", fontSize: 13 }}>
-                      Nenhum preset configurado. Adicione proventos ou descontos fixos mensais.
-                    </div>
+                    <div style={{ padding: 20, textAlign: "center", color: "#9CA3AF", fontSize: 13 }}>Nenhum preset configurado. Adicione proventos ou descontos fixos mensais.</div>
                   ) : (
                     <>
-                      {/* Adições */}
                       {(presets[selectedCollabId] || []).filter(p => p.type === 'addition').length > 0 && (
                         <div style={{ marginBottom: 16 }}>
                           <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#16A34A", marginBottom: 8 }}>Proventos Fixos</div>
                           {(presets[selectedCollabId] || []).filter(p => p.type === 'addition').map((preset) => (
-                            <div key={preset.id} style={{
-                              display: "flex", justifyContent: "space-between", alignItems: "center",
-                              padding: "8px 0", borderBottom: "1px solid #F3F0EB",
-                              opacity: preset.is_active ? 1 : 0.4,
-                            }}>
+                            <div key={preset.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #F3F0EB", opacity: preset.is_active ? 1 : 0.4 }}>
                               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                 <span style={{ width: 20, height: 20, borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, background: "#22C55E", color: "#fff" }}>+</span>
                                 <span style={{ fontSize: 13, color: "#374151", textDecoration: preset.is_active ? "none" : "line-through" }}>{preset.description}</span>
-                                <span style={{ fontSize: 10, color: "#9CA3AF", background: "#F3F4F6", padding: "2px 6px", borderRadius: 4 }}>
-                                  {ADJUSTMENT_CATEGORIES.find(c => c.value === preset.category)?.label || preset.category}
-                                </span>
+                                <span style={{ fontSize: 10, color: "#9CA3AF", background: "#F3F4F6", padding: "2px 6px", borderRadius: 4 }}>{ADJUSTMENT_CATEGORIES.find(c => c.value === preset.category)?.label || preset.category}</span>
                               </div>
                               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                 <span style={{ fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", color: "#16A34A", fontSize: 13 }}>+{formatCurrency(preset.value)}</span>
-                                <button onClick={() => togglePreset(preset)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: preset.is_active ? "#9CA3AF" : "#3B82F6", padding: "0 2px" }} title={preset.is_active ? "Desativar" : "Ativar"}>
-                                  {preset.is_active ? "⏸" : "▶"}
-                                </button>
+                                <button onClick={() => togglePreset(preset)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: preset.is_active ? "#9CA3AF" : "#3B82F6", padding: "0 2px" }}>{preset.is_active ? "⏸" : "▶"}</button>
                                 <button onClick={() => removePreset(preset.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#D1D5DB", fontSize: 14, padding: "0 2px" }}>✕</button>
                               </div>
                             </div>
                           ))}
                         </div>
                       )}
-
-                      {/* Deduções */}
                       {(presets[selectedCollabId] || []).filter(p => p.type === 'deduction').length > 0 && (
                         <div style={{ marginBottom: 16 }}>
                           <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#DC2626", marginBottom: 8 }}>Descontos Fixos</div>
                           {(presets[selectedCollabId] || []).filter(p => p.type === 'deduction').map((preset) => (
-                            <div key={preset.id} style={{
-                              display: "flex", justifyContent: "space-between", alignItems: "center",
-                              padding: "8px 0", borderBottom: "1px solid #F3F0EB",
-                              opacity: preset.is_active ? 1 : 0.4,
-                            }}>
+                            <div key={preset.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #F3F0EB", opacity: preset.is_active ? 1 : 0.4 }}>
                               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                 <span style={{ width: 20, height: 20, borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, background: "#EF4444", color: "#fff" }}>−</span>
                                 <span style={{ fontSize: 13, color: "#374151", textDecoration: preset.is_active ? "none" : "line-through" }}>{preset.description}</span>
-                                <span style={{ fontSize: 10, color: "#9CA3AF", background: "#F3F4F6", padding: "2px 6px", borderRadius: 4 }}>
-                                  {ADJUSTMENT_CATEGORIES.find(c => c.value === preset.category)?.label || preset.category}
-                                </span>
+                                <span style={{ fontSize: 10, color: "#9CA3AF", background: "#F3F4F6", padding: "2px 6px", borderRadius: 4 }}>{ADJUSTMENT_CATEGORIES.find(c => c.value === preset.category)?.label || preset.category}</span>
                               </div>
                               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                 <span style={{ fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", color: "#DC2626", fontSize: 13 }}>−{formatCurrency(preset.value)}</span>
-                                <button onClick={() => togglePreset(preset)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: preset.is_active ? "#9CA3AF" : "#3B82F6", padding: "0 2px" }} title={preset.is_active ? "Desativar" : "Ativar"}>
-                                  {preset.is_active ? "⏸" : "▶"}
-                                </button>
+                                <button onClick={() => togglePreset(preset)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: preset.is_active ? "#9CA3AF" : "#3B82F6", padding: "0 2px" }}>{preset.is_active ? "⏸" : "▶"}</button>
                                 <button onClick={() => removePreset(preset.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#D1D5DB", fontSize: 14, padding: "0 2px" }}>✕</button>
                               </div>
                             </div>
                           ))}
                         </div>
                       )}
-
-                      {/* Totals */}
                       <div style={{ borderTop: "2px solid #1B2A4A", paddingTop: 12, marginTop: 8 }}>
                         {presetTotalAdd > 0 && (
                           <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 13 }}>
@@ -1022,12 +1116,6 @@ export default function PayrollApp() {
     </div>
   );
 }
-
-
-
-
-
-
 
 
 
