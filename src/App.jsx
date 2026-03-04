@@ -148,7 +148,6 @@ const PdfPageViewer = ({ pdfUrl, pageNumber }) => {
       setLoading(true);
       setError(false);
       try {
-        // Load pdf.js dynamically
         if (!window.pdfjsLib) {
           await new Promise((resolve, reject) => {
             if (document.getElementById("pdfjs-script")) {
@@ -253,6 +252,8 @@ export default function PayrollApp() {
 
   const [refMonth, setRefMonth] = useState(new Date().getMonth() + 1);
   const [refYear, setRefYear] = useState(new Date().getFullYear());
+
+  const [duplicateWarnings, setDuplicateWarnings] = useState([]);
 
   // Derived
   const currentPeriod = periods.find((p) => p.id === currentPeriodId);
@@ -376,6 +377,7 @@ export default function PayrollApp() {
     setUploading(true);
     setUploadProgress("Enviando PDF para processamento...");
     setError(null);
+    setDuplicateWarnings([]);
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -410,6 +412,20 @@ export default function PayrollApp() {
             setRefYear(found[0].reference_year);
             await loadPeriods();
             await loadPaychecks(found[0].id);
+            // Buscar avisos de duplicados
+            try {
+              const logs = await supabase.select(
+                "processing_logs",
+                `payroll_period_id=eq.${found[0].id}&action=eq.duplicate_skipped`,
+                "created_at.desc"
+              );
+              if (logs.length > 0) {
+                const warnings = logs.map(l => {
+                  try { return JSON.parse(l.details); } catch { return { message: "Registro duplicado ignorado" }; }
+                });
+                setDuplicateWarnings(warnings);
+              }
+            } catch (logErr) { console.error("Erro ao buscar logs:", logErr); }
             setUploadProgress("");
             setUploading(false);
           }
@@ -548,8 +564,9 @@ export default function PayrollApp() {
     ? `${MONTH_NAMES[currentPeriod.reference_month - 1]} ${currentPeriod.reference_year}`
     : `${MONTH_NAMES[refMonth - 1]} ${refYear}`;
 
-  const pdfUrl = currentPeriod
-    ? `${CONFIG.SUPABASE_URL}/storage/v1/object/public/paychecks/${currentPeriod.reference_year}/${String(currentPeriod.reference_month).padStart(2, "0")}.pdf`
+  // PDF URL agora usa o path individual salvo no contracheque
+  const pdfUrl = selectedPaycheck?.individual_pdf_path
+    ? `${CONFIG.SUPABASE_URL}/storage/v1/object/public/${selectedPaycheck.individual_pdf_path}`
     : null;
 
   const details = selectedPaycheck ? getExtractedDetails(selectedPaycheck) : [];
@@ -615,6 +632,25 @@ export default function PayrollApp() {
           <button onClick={() => setError(null)} style={{
             background: "none", border: "none", color: "#991B1B", cursor: "pointer", fontSize: 16,
           }}>✕</button>
+        </div>
+      )}
+
+      {duplicateWarnings.length > 0 && (
+        <div style={{
+          background: "#FEF3C7", border: "1px solid #FCD34D", color: "#92400E",
+          padding: "12px 24px", fontSize: 13,
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <span style={{ fontWeight: 700 }}>
+              ⚠️ {duplicateWarnings.length} contracheque{duplicateWarnings.length > 1 ? "s" : ""} ignorado{duplicateWarnings.length > 1 ? "s" : ""} (já existiam)
+            </span>
+            <button onClick={() => setDuplicateWarnings([])} style={{
+              background: "none", border: "none", color: "#92400E", cursor: "pointer", fontSize: 16,
+            }}>✕</button>
+          </div>
+          <div style={{ fontSize: 12, color: "#A16207" }}>
+            {duplicateWarnings.map((w) => w.collaborator).filter(Boolean).join(", ")}
+          </div>
         </div>
       )}
 
@@ -1167,11 +1203,6 @@ export default function PayrollApp() {
     </div>
   );
 }
-
-
-
-
-
 
 
 
