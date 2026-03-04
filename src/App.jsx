@@ -134,14 +134,14 @@ const Spinner = () => (
   }} />
 );
 
-// PDF Page Viewer - renders a single page from a PDF
-const PdfPageViewer = ({ pdfUrl, pageNumber }) => {
-  const canvasRef = useRef(null);
+// PDF Page Viewer - renders ALL pages from a PDF
+const PdfPageViewer = ({ pdfUrl }) => {
+  const containerRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    if (!pdfUrl || !pageNumber) return;
+    if (!pdfUrl) return;
     let cancelled = false;
 
     const loadPdf = async () => {
@@ -172,16 +172,30 @@ const PdfPageViewer = ({ pdfUrl, pageNumber }) => {
 
         const pdf = await window.pdfjsLib.getDocument(pdfUrl).promise;
         if (cancelled) return;
-        const page = await pdf.getPage(pageNumber);
-        if (cancelled) return;
 
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext("2d");
-        const viewport = page.getViewport({ scale: 1.5 });
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        await page.render({ canvasContext: ctx, viewport }).promise;
+        const container = containerRef.current;
+        if (!container) return;
+        container.innerHTML = '';
+
+        const totalPages = pdf.numPages;
+        for (let i = 1; i <= totalPages; i++) {
+          const page = await pdf.getPage(i);
+          if (cancelled) return;
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          const viewport = page.getViewport({ scale: 1.5 });
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          canvas.style.width = '100%';
+          canvas.style.height = 'auto';
+          canvas.style.borderRadius = '8px';
+          canvas.style.border = '1px solid #E5E2DB';
+          canvas.style.boxShadow = '0 2px 8px rgba(0,0,0,0.08)';
+          if (i > 1) canvas.style.marginTop = '12px';
+          await page.render({ canvasContext: ctx, viewport }).promise;
+          container.appendChild(canvas);
+        }
+
         setLoading(false);
       } catch (err) {
         console.error("Erro ao renderizar PDF:", err);
@@ -191,7 +205,7 @@ const PdfPageViewer = ({ pdfUrl, pageNumber }) => {
 
     loadPdf();
     return () => { cancelled = true; };
-  }, [pdfUrl, pageNumber]);
+  }, [pdfUrl]);
 
   if (error) {
     return (
@@ -216,15 +230,7 @@ const PdfPageViewer = ({ pdfUrl, pageNumber }) => {
           <div style={{ fontSize: 12, marginTop: 8 }}>Carregando contracheque...</div>
         </div>
       )}
-      <canvas
-        ref={canvasRef}
-        style={{
-          width: "100%", height: "auto", borderRadius: 8,
-          border: "1px solid #E5E2DB",
-          display: loading ? "none" : "block",
-          boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
-        }}
-      />
+      <div ref={containerRef} style={{ display: loading ? "none" : "block" }} />
     </div>
   );
 };
@@ -284,9 +290,6 @@ export default function PayrollApp() {
     skipped: paychecks.filter((p) => p.status === "skipped").length,
   };
 
-  // ============================================================
-  // Data Loading
-  // ============================================================
   const loadCollaborators = useCallback(async () => {
     try {
       const data = await supabase.select("collaborators", "is_active=eq.true", "full_name.asc");
@@ -324,7 +327,6 @@ export default function PayrollApp() {
     }
   }, [currentPeriodId]);
 
-  // Init
   useEffect(() => {
     const init = async () => {
       setLoading(true);
@@ -347,7 +349,6 @@ export default function PayrollApp() {
     }
   }, [currentPeriodId]);
 
-  // Mudar mês/ano => buscar período correspondente
   const handleMonthYearChange = useCallback((month, year) => {
     setRefMonth(month);
     setRefYear(year);
@@ -364,9 +365,6 @@ export default function PayrollApp() {
     }
   }, [periods]);
 
-  // ============================================================
-  // Actions
-  // ============================================================
   const handlePdfUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -412,7 +410,6 @@ export default function PayrollApp() {
             setRefYear(found[0].reference_year);
             await loadPeriods();
             await loadPaychecks(found[0].id);
-            // Buscar avisos de duplicados
             try {
               const logs = await supabase.select(
                 "processing_logs",
@@ -542,9 +539,6 @@ export default function PayrollApp() {
     } catch { return []; }
   };
 
-  // ============================================================
-  // Render
-  // ============================================================
   if (loading) {
     return (
       <div style={{
@@ -564,7 +558,6 @@ export default function PayrollApp() {
     ? `${MONTH_NAMES[currentPeriod.reference_month - 1]} ${currentPeriod.reference_year}`
     : `${MONTH_NAMES[refMonth - 1]} ${refYear}`;
 
-  // PDF URL agora usa o path individual salvo no contracheque
   const pdfUrl = selectedPaycheck?.individual_pdf_path
     ? `https://cc.escolaamadeus.com/api/split-pdf?url=${encodeURIComponent(CONFIG.SUPABASE_URL + '/storage/v1/object/public/' + selectedPaycheck.individual_pdf_path)}&pages=${selectedPaycheck.page_numbers ? selectedPaycheck.page_numbers.join(',') : (selectedPaycheck.pdf_page_number || 1)}`
     : null;
@@ -580,7 +573,6 @@ export default function PayrollApp() {
     }}>
       <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
-      {/* HEADER */}
       <header style={{
         background: "#1B2A4A", color: "#fff", padding: "0 32px", height: 64,
         display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -642,7 +634,7 @@ export default function PayrollApp() {
         }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
             <span style={{ fontWeight: 700 }}>
-              ⚠️ {duplicateWarnings.length} contracheque{duplicateWarnings.length > 1 ? "s" : ""} ignorado{duplicateWarnings.length > 1 ? "s" : ""} (já existiam)
+              ⚠️ {[...new Set(duplicateWarnings.map((w) => w.collaborator).filter(Boolean))].length} contracheque{[...new Set(duplicateWarnings.map((w) => w.collaborator).filter(Boolean))].length > 1 ? "s" : ""} ignorado{[...new Set(duplicateWarnings.map((w) => w.collaborator).filter(Boolean))].length > 1 ? "s" : ""} (já existiam)
             </span>
             <button onClick={() => setDuplicateWarnings([])} style={{
               background: "none", border: "none", color: "#92400E", cursor: "pointer", fontSize: 16,
@@ -655,12 +647,10 @@ export default function PayrollApp() {
       )}
 
       <div style={{ display: "flex", height: "calc(100vh - 64px)" }}>
-        {/* ===== LEFT PANEL ===== */}
         <div style={{
           width: 380, borderRight: "1px solid #E5E2DB",
           display: "flex", flexDirection: "column", background: "#FFFFFF",
         }}>
-          {/* Upload */}
           <div style={{ padding: 20, borderBottom: "1px solid #E5E2DB" }}>
             {uploading ? (
               <div style={{
@@ -709,7 +699,6 @@ export default function PayrollApp() {
             )}
           </div>
 
-          {/* Stats */}
           {paychecks.length > 0 && (
             <div style={{
               display: "grid", gridTemplateColumns: "repeat(4, 1fr)",
@@ -737,7 +726,6 @@ export default function PayrollApp() {
             </div>
           )}
 
-          {/* Search + Filter */}
           {paychecks.length > 0 && (
             <div style={{ padding: "12px 20px", borderBottom: "1px solid #E5E2DB" }}>
               <input type="text" placeholder="Buscar colaborador..."
@@ -769,7 +757,6 @@ export default function PayrollApp() {
             </div>
           )}
 
-          {/* List */}
           <div style={{ flex: 1, overflowY: "auto" }}>
             {filteredPaychecks.length === 0 && !uploading && (
               <div style={{ padding: 32, textAlign: "center", color: "#9CA3AF", fontSize: 13 }}>
@@ -816,7 +803,6 @@ export default function PayrollApp() {
             })}
           </div>
 
-          {/* Send batch */}
           {stats.reviewed > 0 && (
             <div style={{ padding: 16, borderTop: "1px solid #E5E2DB" }}>
               <button onClick={sendBatchEmails} disabled={sending} style={{
@@ -833,7 +819,6 @@ export default function PayrollApp() {
           )}
         </div>
 
-        {/* ===== RIGHT PANEL - EMAIL PREVIEW ===== */}
         <div style={{ flex: 1, overflowY: "auto", padding: 32, background: "#EDEAE5" }}>
           {!selectedPaycheck ? (
             <div style={{
@@ -846,8 +831,6 @@ export default function PayrollApp() {
             </div>
           ) : (
             <div style={{ maxWidth: 680, margin: "0 auto" }}>
-
-              {/* Envelope */}
               <div style={{
                 background: "#fff", borderRadius: "12px 12px 0 0", padding: "16px 24px",
                 border: "1px solid #D1D5DB", borderBottom: "none", fontSize: 13, color: "#6B7280",
@@ -866,12 +849,10 @@ export default function PayrollApp() {
                 </div>
               </div>
 
-              {/* Email body */}
               <div style={{
                 background: "#fff", border: "1px solid #D1D5DB",
                 borderRadius: "0 0 12px 12px", overflow: "hidden",
               }}>
-                {/* Header bar */}
                 <div style={{
                   background: "#1B2A4A", padding: "24px 32px",
                   color: "#fff", textAlign: "center",
@@ -883,7 +864,6 @@ export default function PayrollApp() {
                 </div>
 
                 <div style={{ padding: "28px 32px" }}>
-                  {/* Greeting */}
                   <p style={{ fontSize: 15, color: "#374151", lineHeight: 1.6, margin: "0 0 8px" }}>
                     Olá, <strong>{selectedCollaborator?.full_name?.split(" ")[0]}</strong>!
                   </p>
@@ -892,18 +872,16 @@ export default function PayrollApp() {
                     O PDF completo está anexo neste e-mail.
                   </p>
 
-                  {/* PDF Page Preview */}
                   {pdfUrl && selectedPaycheck?.pdf_page_number && (
                     <div style={{ marginBottom: 24 }}>
                       <div style={{
                         fontSize: 11, fontWeight: 600, textTransform: "uppercase",
                         letterSpacing: 1, color: "#9CA3AF", marginBottom: 10,
                       }}>Contracheque — Página{selectedPaycheck.page_numbers?.length > 1 ? 's' : ''} {selectedPaycheck.page_numbers ? selectedPaycheck.page_numbers.join(', ') : selectedPaycheck.pdf_page_number}</div>
-                      <PdfPageViewer pdfUrl={pdfUrl} pageNumber={1} />
+                      <PdfPageViewer pdfUrl={pdfUrl} />
                     </div>
                   )}
 
-                  {/* Summary card */}
                   <div style={{
                     background: "#F8F7F4", borderRadius: 12, padding: "20px 24px",
                     border: "1px solid #E5E2DB", marginBottom: 24,
@@ -913,7 +891,6 @@ export default function PayrollApp() {
                       letterSpacing: 1, color: "#9CA3AF", marginBottom: 16,
                     }}>Resumo Salarial</div>
 
-                    {/* Proventos */}
                     {earnings.length > 0 && (
                       <div style={{ marginBottom: 16 }}>
                         <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#16A34A", marginBottom: 8 }}>
@@ -945,7 +922,6 @@ export default function PayrollApp() {
                       </div>
                     )}
 
-                    {/* Descontos */}
                     {deductions.length > 0 && (
                       <div style={{ marginBottom: 16 }}>
                         <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#DC2626", marginBottom: 8 }}>
@@ -977,7 +953,6 @@ export default function PayrollApp() {
                       </div>
                     )}
 
-                    {/* Fallback simples se não tem details */}
                     {details.length === 0 && (
                       <>
                         <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #E5E2DB", fontSize: 14 }}>
@@ -995,7 +970,6 @@ export default function PayrollApp() {
                       </>
                     )}
 
-                    {/* Ajustes escola */}
                     {selectedAdjustments.length > 0 && (
                       <div style={{ marginTop: 16, paddingTop: 16, borderTop: "2px dashed #E5E2DB" }}>
                         <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#F59E0B", marginBottom: 8 }}>
@@ -1032,7 +1006,6 @@ export default function PayrollApp() {
                       </div>
                     )}
 
-                    {/* Total */}
                     <div style={{
                       display: "flex", justifyContent: "space-between", alignItems: "center",
                       padding: "16px 0 0", marginTop: 16, borderTop: "2px solid #1B2A4A",
@@ -1045,7 +1018,6 @@ export default function PayrollApp() {
                     </div>
                   </div>
 
-                  {/* Attachment */}
                   <div style={{
                     display: "flex", alignItems: "center", gap: 12,
                     padding: "12px 16px", borderRadius: 8,
@@ -1060,7 +1032,6 @@ export default function PayrollApp() {
                     </div>
                   </div>
 
-                  {/* Footer */}
                   <div style={{
                     borderTop: "1px solid #E5E2DB", paddingTop: 16,
                     fontSize: 12, color: "#9CA3AF", textAlign: "center", lineHeight: 1.6,
@@ -1071,10 +1042,8 @@ export default function PayrollApp() {
                 </div>
               </div>
 
-              {/* ===== ACTIONS (fora do email) ===== */}
               {!["sent"].includes(selectedPaycheck.status) && (
                 <div style={{ marginTop: 20 }}>
-                  {/* Add adjustment */}
                   {!["skipped"].includes(selectedPaycheck.status) && (
                     <div style={{
                       background: "#fff", borderRadius: 12, padding: "16px 20px",
@@ -1145,7 +1114,6 @@ export default function PayrollApp() {
                     </div>
                   )}
 
-                  {/* Buttons */}
                   <div style={{ display: "flex", gap: 10 }}>
                     {["extracted", "pending_review"].includes(selectedPaycheck.status) && (
                       <>
@@ -1203,8 +1171,6 @@ export default function PayrollApp() {
     </div>
   );
 }
-
-
 
 
 
