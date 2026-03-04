@@ -898,8 +898,8 @@ export default function PayrollApp() {
                       <div style={{
                         fontSize: 11, fontWeight: 600, textTransform: "uppercase",
                         letterSpacing: 1, color: "#9CA3AF", marginBottom: 10,
-                      }}>Contracheque — Página {selectedPaycheck.pdf_page_number}</div>
-                      <PdfPageViewer pdfUrl={pdfUrl} pageNumber={selectedPaycheck.pdf_page_number} />
+                      }}>Contracheque — Página{selectedPaycheck.page_numbers?.length > 1 ? 's' : ''} {selectedPaycheck.page_numbers ? selectedPaycheck.page_numbers.join(', ') : selectedPaycheck.pdf_page_number}</div>
+                      <PdfPageViewer pdfUrl={pdfUrl} pageNumber={1} />
                     </div>
                   )}
 
@@ -1203,6 +1203,7 @@ export default function PayrollApp() {
     </div>
   );
 }
+
 
 
 
