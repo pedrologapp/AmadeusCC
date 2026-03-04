@@ -1,6 +1,6 @@
-const { PDFDocument } = require('pdf-lib');
+import { PDFDocument } from 'pdf-lib';
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   const params = req.method === 'POST' ? req.body : req.query;
   const { url, page } = params;
 
@@ -25,7 +25,7 @@ module.exports = async (req, res) => {
 
     if (pageNum > totalPages) {
       return res.status(400).json({
-        error: 'Página ' + pageNum + ' não existe. O PDF tem ' + totalPages + ' páginas.'
+        error: 'Pagina ' + pageNum + ' nao existe. O PDF tem ' + totalPages + ' paginas.'
       });
     }
 
