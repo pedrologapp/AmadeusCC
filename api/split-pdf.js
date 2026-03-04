@@ -12,7 +12,6 @@ module.exports = async (req, res) => {
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const newPdf = await PDFDocument.create();
 
-    // Suporta "pages=1,2,3" ou "page=1" (retrocompatível)
     let pageList = [];
     if (pages) {
       pageList = pages.split(',').map(p => parseInt(p.trim(), 10));
@@ -36,4 +35,4 @@ module.exports = async (req, res) => {
   } catch (err) {
     res.status(500).send('Error: ' + err.message);
   }
-};
+};;
