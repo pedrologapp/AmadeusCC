@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { parsePayrollWorkbook, suggestCollaborator } from "./lib/excelImport";
 
 const CONFIG = {
   SUPABASE_URL: "https://lzqhjutknqeuhscfxald.supabase.co",
   SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx6cWhqdXRrbnFldWhzY2Z4YWxkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM4OTY0ODgsImV4cCI6MjA2OTQ3MjQ4OH0.AtiXJ2BpmulSUXo--bz_jKu0esAyS71kF33nWNE1YHk",
   N8N_WEBHOOK_PROCESS_PDF: "https://webhook.escolaamadeus.com/webhook/process-payroll-pdf",
   N8N_WEBHOOK_SEND_EMAILS: "https://webhook.escolaamadeus.com/webhook/send-payroll-emails",
+  API_BASE: "https://cc.escolaamadeus.com", // nossas funções no Vercel
   SCHOOL_NAME: "Escola Amadeus",
 };
 
@@ -48,9 +50,61 @@ const supabase = {
 const formatCurrency = (value) =>
   new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(value || 0);
 
+// De-para "aba do Excel -> colaborador", guardado no navegador (localStorage).
+// Na Fase 3 isso migra para o Supabase junto com o login.
+const MAPPING_KEY = "excel_collab_mappings_v1";
+const loadMappings = () => { try { return JSON.parse(localStorage.getItem(MAPPING_KEY) || "{}"); } catch { return {}; } };
+const saveMappings = (m) => { try { localStorage.setItem(MAPPING_KEY, JSON.stringify(m)); } catch (e) {} };
+
+// Carrega o pdf.js (CDN) para contar as páginas no navegador
+const ensurePdfJs = () => new Promise((resolve, reject) => {
+  if (window.pdfjsLib) return resolve(window.pdfjsLib);
+  const existing = document.getElementById("pdfjs-script");
+  if (existing) {
+    const check = setInterval(() => { if (window.pdfjsLib) { clearInterval(check); resolve(window.pdfjsLib); } }, 100);
+    setTimeout(() => { clearInterval(check); reject(new Error("pdf.js timeout")); }, 10000);
+    return;
+  }
+  const s = document.createElement("script");
+  s.id = "pdfjs-script";
+  s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+  s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; resolve(window.pdfjsLib); };
+  s.onerror = reject;
+  document.head.appendChild(s);
+});
+
+const getPdfPageCount = async (arrayBuffer) => {
+  const lib = await ensurePdfJs();
+  const pdf = await lib.getDocument({ data: arrayBuffer }).promise;
+  return pdf.numPages;
+};
+
+// Casa um colaborador extraído pela IA com o cadastro (código -> CPF -> nome)
+const matchCollaborator = (emp, collaborators) => {
+  let m = collaborators.find((c) => c.employee_code && emp.employee_code && c.employee_code === emp.employee_code);
+  if (!m && emp.cpf) m = collaborators.find((c) => c.cpf && c.cpf === emp.cpf);
+  if (!m && emp.employee_name) {
+    const name = emp.employee_name.toUpperCase().trim();
+    m = collaborators.find((c) => {
+      const cn = (c.full_name || "").toUpperCase().trim();
+      return cn === name || cn.includes(name) || name.includes(cn);
+    });
+  }
+  return m || null;
+};
+
 const MONTH_NAMES = [
   "Janeiro","Fevereiro","Março","Abril","Maio","Junho",
   "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro",
+];
+
+// Etapas do assistente guiado (Fase 2b)
+const WIZARD_STEPS = [
+  { n: 1, label: "Mês" },
+  { n: 2, label: "PDF" },
+  { n: 3, label: "Excel" },
+  { n: 4, label: "Revisar" },
+  { n: 5, label: "Enviar" },
 ];
 
 const ADJUSTMENT_CATEGORIES = [
@@ -212,6 +266,24 @@ export default function PayrollApp() {
   const [editablePresets, setEditablePresets] = useState([]);
   const [applyingPresets, setApplyingPresets] = useState(false);
 
+  // Importação de Excel (planilha mensal da folha)
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importRows, setImportRows] = useState([]);
+  const [importing, setImporting] = useState(false);
+  const [importNote, setImportNote] = useState("");
+
+  // Navegação (Fase 2): painel de meses x assistente
+  const [view, setView] = useState("dashboard"); // "dashboard" | "process"
+  const [periodStats, setPeriodStats] = useState({});
+  const [wizardStep, setWizardStep] = useState(1); // 1..5
+
+  // Configurações (Fase 2c): colaboradores + proventos
+  const [settingsTab, setSettingsTab] = useState("colaboradores"); // "colaboradores" | "proventos"
+  const [allCollaborators, setAllCollaborators] = useState([]);
+  const [collabSearch, setCollabSearch] = useState("");
+  const [editCollab, setEditCollab] = useState(null);
+  const [savingCollab, setSavingCollab] = useState(false);
+
   const currentPeriod = periods.find((p) => p.id === currentPeriodId);
   const selectedPaycheck = paychecks.find((p) => p.id === selectedPaycheckId);
   const selectedCollaborator = selectedPaycheck ? collaborators.find((c) => c.id === selectedPaycheck.collaborator_id) : null;
@@ -250,6 +322,11 @@ export default function PayrollApp() {
     try { const data = await supabase.select("collaborators", "is_active=eq.true", "full_name.asc"); setCollaborators(data); } catch (err) { console.error(err); }
   }, []);
 
+  // Carrega TODOS os colaboradores (incl. inativos) para a tela de Configurações
+  const loadAllCollaborators = useCallback(async () => {
+    try { const data = await supabase.select("collaborators", "", "full_name.asc"); setAllCollaborators(data); } catch (err) { console.error(err); }
+  }, []);
+
   const loadPeriods = useCallback(async () => {
     try { const data = await supabase.select("payroll_periods", "", "reference_year.desc,reference_month.desc"); setPeriods(data); return data; } catch (err) { console.error(err); return []; }
   }, []);
@@ -278,12 +355,32 @@ export default function PayrollApp() {
     } catch (err) { console.error(err); }
   }, []);
 
+  // Carrega contagem de status por período (para o painel de meses)
+  const loadPeriodStats = useCallback(async () => {
+    try {
+      const rows = await supabase.select("paychecks", "select=payroll_period_id,status");
+      const m = {};
+      for (const r of rows) {
+        const k = r.payroll_period_id;
+        if (!m[k]) m[k] = { total: 0, sent: 0, reviewed: 0, pending: 0, skipped: 0 };
+        m[k].total++;
+        if (r.status === "sent") m[k].sent++;
+        else if (["reviewed", "approved"].includes(r.status)) m[k].reviewed++;
+        else if (["extracted", "pending_review"].includes(r.status)) m[k].pending++;
+        else if (r.status === "skipped") m[k].skipped++;
+      }
+      setPeriodStats(m);
+    } catch (err) { console.error(err); }
+  }, []);
+
   useEffect(() => {
     const init = async () => {
       setLoading(true);
       await loadCollaborators();
       const data = await loadPeriods();
       await loadPresets();
+      await loadPeriodStats();
+      await loadAllCollaborators();
       if (data.length > 0) { setCurrentPeriodId(data[0].id); setRefMonth(data[0].reference_month); setRefYear(data[0].reference_year); }
       setLoading(false);
     };
@@ -300,41 +397,241 @@ export default function PayrollApp() {
     if (found) { setCurrentPeriodId(found.id); } else { setCurrentPeriodId(null); setPaychecks([]); setAdjustments({}); setSelectedPaycheckId(null); }
   }, [periods]);
 
+  // Navegação entre painel de meses e o assistente
+  const openMonth = (period) => {
+    setCurrentPeriodId(period.id);
+    setRefMonth(period.reference_month); setRefYear(period.reference_year);
+    setActiveTab("contracheques"); setSelectedPaycheckId(null);
+    const s = periodStats[period.id];
+    let step = 4;
+    if (!s || s.total === 0) step = 2;
+    else if (s.pending === 0 && (s.reviewed > 0 || s.sent > 0)) step = 5;
+    setWizardStep(step);
+    setError(null); setImportNote(""); setDuplicateWarnings([]); setView("process");
+  };
+  const startNewMonth = () => {
+    const now = new Date();
+    setCurrentPeriodId(null); setPaychecks([]); setAdjustments({});
+    setRefMonth(now.getMonth() + 1); setRefYear(now.getFullYear());
+    setActiveTab("contracheques"); setSelectedPaycheckId(null); setWizardStep(1);
+    setError(null); setImportNote(""); setDuplicateWarnings([]); setView("process");
+  };
+  const backToDashboard = async () => {
+    setView("dashboard"); setSelectedPaycheckId(null); setError(null);
+    await loadPeriods(); await loadPeriodStats();
+  };
+  const openSettings = () => {
+    setSettingsTab("colaboradores"); setEditCollab(null); setError(null);
+    loadAllCollaborators(); setView("settings");
+  };
+
+  // Colaboradores (Configurações)
+  const newCollab = () => setEditCollab({ full_name: "", email: "", role: "", employee_code: "", cpf: "", is_active: true });
+  const editExistingCollab = (c) => setEditCollab({ ...c });
+  const updateEditCollabField = (field, value) => setEditCollab((prev) => ({ ...prev, [field]: value }));
+  const saveCollab = async () => {
+    if (!editCollab) return;
+    if (!editCollab.full_name?.trim()) { setError("O nome completo é obrigatório."); return; }
+    setSavingCollab(true); setError(null);
+    try {
+      const payload = {
+        full_name: editCollab.full_name.trim(),
+        email: editCollab.email?.trim() || null,
+        role: editCollab.role?.trim() || null,
+        employee_code: editCollab.employee_code?.trim() || null,
+        cpf: editCollab.cpf?.trim() || null,
+        is_active: editCollab.is_active !== false,
+      };
+      let res;
+      if (editCollab.id) res = await supabase.update("collaborators", editCollab.id, payload);
+      else res = await supabase.insert("collaborators", payload);
+      if (res?.[0]) setEditCollab({ ...res[0] });
+      await loadAllCollaborators(); await loadCollaborators();
+      setSavingCollab(false);
+    } catch (err) { setError(`Erro ao salvar colaborador: ${err.message}`); setSavingCollab(false); }
+  };
+  const toggleCollabActive = async () => {
+    if (!editCollab?.id) return;
+    try {
+      const res = await supabase.update("collaborators", editCollab.id, { is_active: !editCollab.is_active });
+      if (res?.[0]) setEditCollab({ ...res[0] });
+      await loadAllCollaborators(); await loadCollaborators();
+    } catch (err) { setError(`Erro: ${err.message}`); }
+  };
+
   // ============================================================
   // Contracheques Actions
   // ============================================================
   const handlePdfUpload = async (e) => {
     const file = e.target.files?.[0];
+    if (e.target) e.target.value = "";
     if (!file) return;
     if (file.type !== "application/pdf") { setError("Por favor, selecione um arquivo PDF."); return; }
-    setUploading(true); setUploadProgress("Enviando PDF para processamento..."); setError(null); setDuplicateWarnings([]);
+    setUploading(true); setError(null); setDuplicateWarnings([]); setImportNote("");
+    const mes = refMonth, ano = refYear;
     try {
-      const formData = new FormData();
-      formData.append("file", file); formData.append("reference_month", String(refMonth)); formData.append("reference_year", String(refYear));
-      const res = await fetch(CONFIG.N8N_WEBHOOK_PROCESS_PDF, { method: "POST", body: formData });
-      if (!res.ok) throw new Error("Erro ao enviar PDF");
-      await res.json();
-      setUploadProgress("PDF enviado! A IA está processando...");
-      const sm = String(refMonth); const sy = String(refYear);
-      let attempts = 0;
-      const poll = setInterval(async () => {
-        attempts++; setUploadProgress(`Processando... (verificação ${attempts})`);
-        if (attempts > 60) { clearInterval(poll); setUploadProgress("Processamento demorou. Recarregue a página."); setUploading(false); return; }
-        try {
-          const found = await supabase.select("payroll_periods", `reference_month=eq.${sm}&reference_year=eq.${sy}`, "created_at.desc");
-          if (found.length > 0 && found[0].status !== "processing") {
-            clearInterval(poll);
-            setCurrentPeriodId(found[0].id); setRefMonth(found[0].reference_month); setRefYear(found[0].reference_year);
-            await loadPeriods(); await loadPaychecks(found[0].id);
-            try {
-              const logs = await supabase.select("processing_logs", `payroll_period_id=eq.${found[0].id}&action=eq.duplicate_skipped`, "created_at.desc");
-              if (logs.length > 0) { setDuplicateWarnings(logs.map(l => { try { return JSON.parse(l.details); } catch { return { message: "Duplicado" }; } })); }
-            } catch (e) {}
-            setUploadProgress(""); setUploading(false);
-          }
-        } catch (err) { console.error(err); }
-      }, 5000);
-    } catch (err) { setError(`Erro: ${err.message}`); setUploading(false); setUploadProgress(""); }
+      // 1) Conta as páginas do PDF (no navegador)
+      setUploadProgress("Lendo o arquivo...");
+      const numPages = await getPdfPageCount(await file.arrayBuffer());
+
+      // 2) Envia o PDF para o armazenamento (Supabase Storage)
+      setUploadProgress("Enviando o PDF...");
+      const storagePath = `paychecks/${ano}/${String(mes).padStart(2, "0")}_${Date.now()}.pdf`;
+      const up = await fetch(`${CONFIG.SUPABASE_URL}/storage/v1/object/${storagePath}`, {
+        method: "PUT",
+        headers: { apikey: CONFIG.SUPABASE_ANON_KEY, Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`, "Content-Type": "application/pdf", "x-upsert": "true" },
+        body: file,
+      });
+      if (!up.ok) throw new Error("Falha ao enviar o PDF para o armazenamento");
+      const pdfUrl = `${CONFIG.SUPABASE_URL}/storage/v1/object/public/${storagePath}`;
+
+      // 3) Cria (ou reaproveita) o período do mês
+      let period = (await supabase.select("payroll_periods", `reference_month=eq.${mes}&reference_year=eq.${ano}`, "created_at.desc"))[0];
+      if (period) { await supabase.update("payroll_periods", period.id, { status: "processing" }); }
+      else { period = (await supabase.insert("payroll_periods", { reference_month: mes, reference_year: ano, status: "processing" }))[0]; }
+      const periodId = period.id;
+
+      // 4) Lê o PDF em lotes de páginas, chamando nossa função no Vercel
+      const BATCH = 6;
+      const all = [];
+      for (let start = 1; start <= numPages; start += BATCH) {
+        const batchPages = [];
+        for (let p = start; p < start + BATCH && p <= numPages; p++) batchPages.push(p);
+        setUploadProgress(`A IA está lendo as páginas ${start}–${batchPages[batchPages.length - 1]} de ${numPages}...`);
+        const r = await fetch(`${CONFIG.API_BASE}/api/extract-payroll`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pdf_url: pdfUrl, pages: batchPages, origin: CONFIG.API_BASE }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || "Erro ao ler as páginas");
+        if (Array.isArray(data.employees)) all.push(...data.employees);
+      }
+
+      // 5) Junta quem aparece em mais de um lote (por código/CPF/nome)
+      setUploadProgress("Organizando os contracheques...");
+      const byKey = {};
+      for (const emp of all) {
+        const key = (emp.employee_code || emp.cpf || emp.employee_name || "").toString().trim();
+        if (!key) { byKey[`x${Object.keys(byKey).length}`] = { ...emp, pages: [...(emp.pages || [])] }; continue; }
+        if (!byKey[key]) { byKey[key] = { ...emp, pages: [...(emp.pages || [])] }; }
+        else {
+          const ex = byKey[key];
+          const pages = [...new Set([...(ex.pages || []), ...(emp.pages || [])])].sort((a, b) => a - b);
+          if ((emp.net_salary || 0) > (ex.net_salary || 0) || ((emp.details || []).length > (ex.details || []).length)) byKey[key] = { ...emp, pages };
+          else ex.pages = pages;
+        }
+      }
+      const merged = Object.values(byKey);
+
+      // 6) Casa com o cadastro e cria os contracheques
+      let created = 0, unmatched = 0; const dups = [];
+      for (const emp of merged) {
+        const collab = matchCollaborator(emp, collaborators);
+        if (!collab) { unmatched++; continue; }
+        const existing = await supabase.select("paychecks", `payroll_period_id=eq.${periodId}&collaborator_id=eq.${collab.id}`);
+        if (existing.length > 0) { dups.push(collab.full_name); continue; }
+        const pageNums = (emp.pages && emp.pages.length) ? emp.pages : [1];
+        await supabase.insert("paychecks", {
+          payroll_period_id: periodId,
+          collaborator_id: collab.id,
+          extracted_gross_value: emp.gross_salary,
+          extracted_deductions: emp.total_deductions,
+          extracted_net_value: emp.net_salary,
+          final_value: emp.net_salary,
+          ai_confidence_score: 0.95,
+          individual_pdf_path: storagePath,
+          pdf_page_number: pageNums[0],
+          page_numbers: pageNums,
+          status: "extracted",
+          ai_extracted_data: JSON.stringify(emp.details || []),
+        });
+        created++;
+      }
+
+      // 7) Fecha o período e atualiza a tela
+      await supabase.update("payroll_periods", periodId, { status: "reviewing", pdf_total_pages: numPages });
+      setCurrentPeriodId(periodId); setRefMonth(mes); setRefYear(ano);
+      await loadPeriods(); await loadPaychecks(periodId); await loadPeriodStats();
+      if (dups.length) setDuplicateWarnings(dups.map((d) => ({ collaborator: d })));
+      setUploadProgress(""); setUploading(false); setWizardStep(3);
+      let note = `${created} contracheque(s) criado(s) de ${numPages} páginas.`;
+      if (unmatched > 0) note += ` ${unmatched} colaborador(es) não reconhecido(s) — cadastre em ⚙️ Configurações e suba de novo.`;
+      setImportNote(note);
+    } catch (err) {
+      setError(`Erro: ${err.message}`); setUploading(false); setUploadProgress("");
+    }
+  };
+
+  // ============================================================
+  // Importar Excel da folha (lê no navegador, sem n8n)
+  // ============================================================
+  const handleExcelUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (e.target) e.target.value = "";
+    if (!file) return;
+    if (!currentPeriodId) { setError("Suba/selecione o mês (com o PDF) antes de importar o Excel."); return; }
+    setError(null); setImportNote("");
+    try {
+      const buffer = await file.arrayBuffer();
+      const sheets = parsePayrollWorkbook(buffer);
+      const mappings = loadMappings();
+      const rows = sheets.map((s) => {
+        const saved = mappings[s.sheetName];
+        if (saved === "IGNORE") return { ...s, collabId: "", ignored: true };
+        if (saved && collaborators.some((c) => c.id === saved)) return { ...s, collabId: saved, ignored: false };
+        const sug = suggestCollaborator(s.sheetName, collaborators);
+        return { ...s, collabId: sug ? sug.id : "", ignored: false };
+      });
+      setImportRows(rows);
+      setShowImportModal(true);
+    } catch (err) {
+      setError(`Erro ao ler o Excel: ${err.message}`);
+    }
+  };
+
+  const setImportRowCollab = (sheetName, value) => {
+    setImportRows((prev) => prev.map((r) => {
+      if (r.sheetName !== sheetName) return r;
+      if (value === "IGNORE") return { ...r, ignored: true, collabId: "" };
+      return { ...r, ignored: false, collabId: value };
+    }));
+  };
+
+  const confirmImport = async () => {
+    setImporting(true); setError(null);
+    try {
+      // 1) salvar o de-para (aba -> colaborador) para os próximos meses
+      const mappings = loadMappings();
+      for (const r of importRows) {
+        if (r.ignored) mappings[r.sheetName] = "IGNORE";
+        else if (r.collabId) mappings[r.sheetName] = r.collabId;
+      }
+      saveMappings(mappings);
+
+      // 2) aplicar os ajustes nos contracheques do mês atual (substitui os existentes)
+      let applied = 0, noPaycheck = 0;
+      for (const r of importRows) {
+        if (r.ignored || !r.collabId || !r.items?.length) continue;
+        const pc = paychecks.find((p) => p.collaborator_id === r.collabId);
+        if (!pc) { noPaycheck++; continue; }
+        const existing = adjustments[pc.id] || [];
+        for (const a of existing) { await supabase.delete("adjustments", a.id); }
+        for (const it of r.items) {
+          await supabase.insert("adjustments", {
+            paycheck_id: pc.id, type: it.type, description: it.description,
+            value: it.value, category: it.category,
+          });
+        }
+        applied++;
+      }
+      await loadPaychecks();
+      setShowImportModal(false); setImportRows([]); setImporting(false);
+      let msg = `Importação concluída — ${applied} contracheque(s) atualizado(s).`;
+      if (noPaycheck > 0) msg += ` ${noPaycheck} colaborador(es) sem contracheque neste mês (suba o PDF primeiro).`;
+      setImportNote(msg); setWizardStep(4);
+    } catch (err) {
+      setError(`Erro ao importar: ${err.message}`); setImporting(false);
+    }
   };
 
   const addAdjustment = async () => {
@@ -510,27 +807,18 @@ export default function PayrollApp() {
         position: "sticky", top: 0, zIndex: 100, boxShadow: "0 2px 12px rgba(27,42,74,0.15)",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          {view !== "dashboard" && (
+            <button onClick={backToDashboard} style={{ background: "rgba(255,255,255,0.12)", color: "#fff", border: "none", borderRadius: 8, padding: "7px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>← Meses</button>
+          )}
           <div style={{ width: 36, height: 36, borderRadius: 10, background: "linear-gradient(135deg, #F59E0B, #EF4444)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, fontWeight: 800 }}>₵</div>
           <div>
-            <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: -0.3 }}>ContraCheque</div>
-            <div style={{ fontSize: 10, opacity: 0.6, letterSpacing: 1, textTransform: "uppercase" }}>Sistema de Folha de Pagamento</div>
+            <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: -0.3 }}>ContraCheque{view === "process" ? ` — ${periodLabel}` : view === "settings" ? " — Configurações" : ""}</div>
+            <div style={{ fontSize: 10, opacity: 0.6, letterSpacing: 1, textTransform: "uppercase" }}>{view === "process" ? "Escola Amadeus" : view === "settings" ? "Colaboradores e Proventos" : "Sistema de Folha de Pagamento"}</div>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ display: "flex", background: "rgba(255,255,255,0.1)", borderRadius: 8, padding: 2 }}>
-            {[{ key: "contracheques", label: "📋 Contracheques" }, { key: "proventos", label: "💰 Proventos" }].map((tab) => (
-              <button key={tab.key} onClick={() => setActiveTab(tab.key)} style={{
-                padding: "6px 14px", borderRadius: 6, fontSize: 12, fontWeight: 600, border: "none", cursor: "pointer",
-                background: activeTab === tab.key ? "rgba(255,255,255,0.2)" : "transparent",
-                color: activeTab === tab.key ? "#fff" : "rgba(255,255,255,0.6)",
-              }}>{tab.label}</button>
-            ))}
-          </div>
-          {activeTab === "contracheques" && periods.length > 0 && (
-            <select value={currentPeriodId || ""} onChange={(e) => { const p = periods.find((x) => x.id === e.target.value); if (p) { setCurrentPeriodId(p.id); setRefMonth(p.reference_month); setRefYear(p.reference_year); } }}
-              style={{ background: "rgba(255,255,255,0.12)", color: "#fff", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, padding: "6px 12px", fontSize: 13, fontWeight: 500, cursor: "pointer", outline: "none" }}>
-              {periods.map((p) => (<option key={p.id} value={p.id} style={{ color: "#1a1a1a" }}>{MONTH_NAMES[p.reference_month - 1]} {p.reference_year}</option>))}
-            </select>
+          {view === "dashboard" && (
+            <button onClick={openSettings} style={{ background: "rgba(255,255,255,0.12)", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>⚙️ Configurações</button>
           )}
         </div>
       </header>
@@ -542,13 +830,69 @@ export default function PayrollApp() {
         </div>
       )}
 
-      {duplicateWarnings.length > 0 && activeTab === "contracheques" && (
+      {importNote && view === "process" && (
+        <div style={{ background: "#D1FAE5", border: "1px solid #6EE7B7", color: "#065F46", padding: "10px 24px", fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>✓ {importNote}</span>
+          <button onClick={() => setImportNote("")} style={{ background: "none", border: "none", color: "#065F46", cursor: "pointer", fontSize: 16 }}>✕</button>
+        </div>
+      )}
+
+      {duplicateWarnings.length > 0 && view === "process" && (
         <div style={{ background: "#FEF3C7", border: "1px solid #FCD34D", color: "#92400E", padding: "12px 24px", fontSize: 13 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
             <span style={{ fontWeight: 700 }}>⚠️ {[...new Set(duplicateWarnings.map((w) => w.collaborator).filter(Boolean))].length} contracheque(s) ignorado(s) (já existiam)</span>
             <button onClick={() => setDuplicateWarnings([])} style={{ background: "none", border: "none", color: "#92400E", cursor: "pointer", fontSize: 16 }}>✕</button>
           </div>
           <div style={{ fontSize: 12, color: "#A16207" }}>{[...new Set(duplicateWarnings.map((w) => w.collaborator).filter(Boolean))].join(", ")}</div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* PAINEL DE MESES (DASHBOARD) */}
+      {/* ============================================================ */}
+      {view === "dashboard" && (
+        <div style={{ maxWidth: 720, margin: "0 auto", padding: "32px 24px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+            <div>
+              <div style={{ fontSize: 22, fontWeight: 800, color: "#1B2A4A" }}>Meses</div>
+              <div style={{ fontSize: 13, color: "#6B7280" }}>Escolha um mês para processar ou ver o que já foi enviado</div>
+            </div>
+            <button onClick={startNewMonth} style={{ padding: "11px 18px", borderRadius: 10, background: "linear-gradient(135deg, #F59E0B, #EF4444)", color: "#fff", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 700, boxShadow: "0 4px 12px rgba(245,158,11,0.3)" }}>+ Novo mês</button>
+          </div>
+
+          {periods.length === 0 ? (
+            <div style={{ padding: 48, textAlign: "center", color: "#9CA3AF", background: "#fff", borderRadius: 16, border: "1px solid #E5E2DB" }}>
+              <div style={{ fontSize: 40, marginBottom: 12 }}>📅</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: "#6B7280" }}>Nenhum mês ainda</div>
+              <div style={{ fontSize: 13, marginTop: 4 }}>Clique em "Novo mês" para começar</div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {periods.map((p) => {
+                const s = periodStats[p.id] || { total: 0, sent: 0, reviewed: 0, pending: 0, skipped: 0 };
+                let st;
+                if (s.total === 0) st = { label: "Aguardando PDF", color: "#6B7280", bg: "#F3F4F6", icon: "⚪" };
+                else if (s.pending > 0) st = { label: "Precisa revisar", color: "#92400E", bg: "#FEF3C7", icon: "🟡" };
+                else if (s.reviewed > 0) st = { label: "Pronto para enviar", color: "#1E40AF", bg: "#DBEAFE", icon: "🔵" };
+                else if (s.sent > 0) st = { label: "Enviado", color: "#065F46", bg: "#D1FAE5", icon: "✅" };
+                else st = { label: "Em aberto", color: "#6B7280", bg: "#F3F4F6", icon: "⚪" };
+                return (
+                  <div key={p.id} onClick={() => openMonth(p)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", background: "#fff", borderRadius: 14, border: "1px solid #E5E2DB", cursor: "pointer", boxShadow: "0 1px 3px rgba(0,0,0,0.04)" }}>
+                    <div>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: "#1B2A4A" }}>{MONTH_NAMES[p.reference_month - 1]} {p.reference_year}</div>
+                      <div style={{ fontSize: 12, color: "#9CA3AF", marginTop: 2 }}>
+                        {s.total > 0 ? `${s.total} contracheques${s.sent > 0 ? ` · ${s.sent} enviados` : ""}${s.pending > 0 ? ` · ${s.pending} pendentes` : ""}` : "Suba o PDF do contador"}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, padding: "5px 12px", borderRadius: 20, color: st.color, background: st.bg, whiteSpace: "nowrap" }}>{st.icon} {st.label}</span>
+                      <span style={{ fontSize: 20, color: "#CBD5E1" }}>›</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -680,12 +1024,102 @@ export default function PayrollApp() {
       )}
 
       {/* ============================================================ */}
+      {/* IMPORT EXCEL MODAL */}
+      {/* ============================================================ */}
+      {showImportModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={() => !importing && setShowImportModal(false)}>
+          <div style={{ background: "#fff", borderRadius: 16, width: 780, maxHeight: "85vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ padding: "20px 24px", borderBottom: "1px solid #E5E2DB", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#1B2A4A" }}>Importar Excel — {periodLabel}</div>
+                <div style={{ fontSize: 12, color: "#6B7280", marginTop: 2 }}>Confira o colaborador de cada aba. Confirmar substitui os ajustes deste mês.</div>
+              </div>
+              <button onClick={() => !importing && setShowImportModal(false)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#9CA3AF" }}>✕</button>
+            </div>
+
+            {(() => {
+              const ident = importRows.filter((r) => !r.ignored && r.collabId).length;
+              const ign = importRows.filter((r) => r.ignored).length;
+              const none = importRows.filter((r) => !r.ignored && !r.collabId).length;
+              return (
+                <div style={{ display: "flex", gap: 16, padding: "10px 24px", borderBottom: "1px solid #F3F0EB", fontSize: 12 }}>
+                  <span style={{ color: "#16A34A", fontWeight: 600 }}>✓ {ident} identificados</span>
+                  <span style={{ color: "#6B7280", fontWeight: 600 }}>⊘ {ign} ignorados</span>
+                  {none > 0 && <span style={{ color: "#DC2626", fontWeight: 600 }}>⚠ {none} não identificados</span>}
+                </div>
+              );
+            })()}
+
+            <div style={{ overflowY: "auto", padding: "4px 24px", flex: 1 }}>
+              {importRows.map((r) => {
+                const pc = r.collabId ? paychecks.find((p) => p.collaborator_id === r.collabId) : null;
+                const excelTotal = r.grandTotal != null ? r.grandTotal : r.computedTotal;
+                const sysTotal = pc ? (pc.extracted_net_value || 0) + (r.sumSigned || 0) : null;
+                let badge;
+                if (r.ignored) badge = { t: "Ignorado", c: "#6B7280", bg: "#F3F4F6" };
+                else if (!r.collabId) badge = { t: "Selecione", c: "#991B1B", bg: "#FEE2E2" };
+                else if (!pc) badge = { t: "Sem contracheque", c: "#92400E", bg: "#FEF3C7" };
+                else if (sysTotal != null && Math.abs(sysTotal - (excelTotal || 0)) < 0.5 && r.reconciles !== false) badge = { t: "Confere ✓", c: "#065F46", bg: "#D1FAE5" };
+                else badge = { t: "Divergência", c: "#92400E", bg: "#FEF3C7" };
+                const diverge = pc && sysTotal != null && Math.abs(sysTotal - (excelTotal || 0)) >= 0.5;
+                return (
+                  <div key={r.sheetName} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid #F3F0EB", opacity: r.ignored ? 0.55 : 1 }}>
+                    <div style={{ width: 110, flexShrink: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#1B2A4A" }}>{r.sheetName}</div>
+                      {r.innerName && <div style={{ fontSize: 10, color: "#9CA3AF" }} title="Nome de dentro da planilha (apenas dica)">{r.innerName}</div>}
+                    </div>
+                    <select value={r.ignored ? "IGNORE" : r.collabId} onChange={(e) => setImportRowCollab(r.sheetName, e.target.value)}
+                      style={{ flex: 1, minWidth: 0, padding: "6px 8px", borderRadius: 8, border: `1px solid ${!r.ignored && !r.collabId ? "#FCA5A5" : "#E5E2DB"}`, fontSize: 12, outline: "none", background: "#fff" }}>
+                      <option value="">— selecionar —</option>
+                      {collaborators.map((c) => (<option key={c.id} value={c.id}>{c.full_name}</option>))}
+                      <option value="IGNORE">⊘ Ignorar (não é funcionário)</option>
+                    </select>
+                    <div style={{ width: 56, textAlign: "center", fontSize: 12, color: "#6B7280", flexShrink: 0 }}>{r.error ? "erro" : `${r.items.length} aj.`}</div>
+                    <div style={{ width: 150, textAlign: "right", flexShrink: 0 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 12, color: badge.c, background: badge.bg, whiteSpace: "nowrap" }}>{badge.t}</span>
+                      {pc && <div style={{ fontSize: 10, color: diverge ? "#DC2626" : "#9CA3AF", marginTop: 3, fontFamily: "'JetBrains Mono', monospace" }}>{formatCurrency(sysTotal)}{diverge ? ` ≠ ${formatCurrency(excelTotal)}` : ""}</div>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ padding: "16px 24px", borderTop: "1px solid #E5E2DB", display: "flex", gap: 10, alignItems: "center" }}>
+              <div style={{ fontSize: 11, color: "#9CA3AF", flex: 1 }}>Ajustes existentes deste mês serão substituídos pelos do Excel.</div>
+              <button onClick={() => setShowImportModal(false)} disabled={importing} style={{ padding: "11px 16px", borderRadius: 8, background: "#fff", color: "#6B7280", border: "1px solid #D1D5DB", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Cancelar</button>
+              <button onClick={confirmImport} disabled={importing} style={{ padding: "11px 20px", borderRadius: 8, color: "#fff", border: "none", cursor: importing ? "default" : "pointer", fontSize: 13, fontWeight: 700, background: importing ? "#9CA3AF" : "linear-gradient(135deg, #16A34A, #15803D)", display: "flex", alignItems: "center", gap: 6, boxShadow: "0 2px 8px rgba(22,163,74,0.3)" }}>
+                {importing ? <><Spinner /> Importando...</> : <>✓ Aplicar ajustes</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
       {/* CONTRACHEQUES TAB */}
       {/* ============================================================ */}
-      {activeTab === "contracheques" && (
-        <div style={{ display: "flex", height: "calc(100vh - 64px)" }}>
+      {view === "process" && activeTab === "contracheques" && (
+        <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 64px)" }}>
+          {/* STEPPER */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "12px 24px", background: "#fff", borderBottom: "1px solid #E5E2DB", flexShrink: 0 }}>
+            {WIZARD_STEPS.map((s, i) => {
+              const active = wizardStep === s.n;
+              const done = wizardStep > s.n;
+              return (
+                <React.Fragment key={s.n}>
+                  <button onClick={() => setWizardStep(s.n)} style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", cursor: "pointer", padding: "0 6px" }}>
+                    <span style={{ width: 28, height: 28, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, color: (active || done) ? "#fff" : "#9CA3AF", background: active ? "#F59E0B" : done ? "#22C55E" : "#E5E7EB" }}>{done ? "✓" : s.n}</span>
+                    <span style={{ fontSize: 13, fontWeight: active ? 700 : 500, color: active ? "#1B2A4A" : "#9CA3AF" }}>{s.label}</span>
+                  </button>
+                  {i < WIZARD_STEPS.length - 1 && <span style={{ width: 28, height: 2, background: done ? "#22C55E" : "#E5E7EB", margin: "0 4px" }} />}
+                </React.Fragment>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
           {/* LEFT PANEL */}
           <div style={{ width: 380, borderRight: "1px solid #E5E2DB", display: "flex", flexDirection: "column", background: "#FFFFFF" }}>
+            {wizardStep <= 3 && (
             <div style={{ padding: 20, borderBottom: "1px solid #E5E2DB" }}>
               {uploading ? (
                 <div style={{ padding: 20, borderRadius: 12, background: "#FFFBEB", border: "1px solid #FCD34D", textAlign: "center" }}>
@@ -693,6 +1127,7 @@ export default function PayrollApp() {
                 </div>
               ) : (
                 <div>
+                  {wizardStep <= 2 && (<>
                   <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
                     <select value={refMonth} onChange={(e) => handleMonthYearChange(Number(e.target.value), refYear)} style={{ flex: 1, padding: "6px 8px", borderRadius: 8, border: "1px solid #E5E2DB", fontSize: 13, outline: "none" }}>
                       {MONTH_NAMES.map((m, i) => (<option key={i} value={i + 1}>{m}</option>))}
@@ -705,11 +1140,21 @@ export default function PayrollApp() {
                     <span style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A" }}>Upload do PDF de Contracheques</span>
                     <span style={{ fontSize: 11, color: "#94A3B8" }}>Selecione o mês/ano e clique aqui</span>
                   </label>
+                  </>)}
+                  {paychecks.length > 0 && wizardStep === 3 && (
+                    <label style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: 16, marginTop: 10, borderRadius: 12, border: "2px dashed #86EFAC", background: "#F0FDF4", cursor: "pointer", gap: 6 }}>
+                      <input type="file" accept=".xls,.xlsx" onChange={handleExcelUpload} style={{ display: "none" }} />
+                      <span style={{ fontSize: 24 }}>📊</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: "#166534" }}>Importar Excel de Proventos</span>
+                      <span style={{ fontSize: 11, color: "#22C55E" }}>Aplica os ajustes do mês automaticamente</span>
+                    </label>
+                  )}
                 </div>
               )}
             </div>
+            )}
 
-            {paychecks.length > 0 && (
+            {paychecks.length > 0 && wizardStep >= 3 && (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, padding: "12px 20px", borderBottom: "1px solid #E5E2DB" }}>
                 {[{ label: "Pendentes", value: stats.pending, color: "#F59E0B" }, { label: "Validados", value: stats.reviewed, color: "#22C55E" }, { label: "Pular", value: stats.skipped, color: "#9CA3AF" }, { label: "Enviados", value: stats.sent, color: "#3B82F6" }].map((s) => (
                   <div key={s.label} style={{ textAlign: "center", padding: "6px 2px", borderRadius: 8, background: "#F8F7F4" }}>
@@ -720,7 +1165,7 @@ export default function PayrollApp() {
               </div>
             )}
 
-            {paychecks.length > 0 && (
+            {paychecks.length > 0 && wizardStep === 4 && (
               <div style={{ padding: "12px 20px", borderBottom: "1px solid #E5E2DB" }}>
                 <input type="text" placeholder="Buscar colaborador..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
                   style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #E5E2DB", fontSize: 13, background: "#F8F7F4", outline: "none", boxSizing: "border-box" }} />
@@ -772,7 +1217,7 @@ export default function PayrollApp() {
               })}
             </div>
 
-            {stats.reviewed > 0 && (
+            {stats.reviewed > 0 && wizardStep === 5 && (
               <div style={{ padding: 16, borderTop: "1px solid #E5E2DB" }}>
                 <button onClick={sendBatchEmails} disabled={sending} style={{
                   width: "100%", padding: "12px 20px", borderRadius: 10,
@@ -789,8 +1234,8 @@ export default function PayrollApp() {
             {!selectedPaycheck ? (
               <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#9CA3AF" }}>
                 <span style={{ fontSize: 56, marginBottom: 16, opacity: 0.5 }}>📋</span>
-                <div style={{ fontSize: 18, fontWeight: 600, color: "#6B7280" }}>Selecione um colaborador</div>
-                <div style={{ fontSize: 13, marginTop: 4 }}>Clique em um nome na lista para pré-visualizar o e-mail</div>
+                <div style={{ fontSize: 18, fontWeight: 600, color: "#6B7280" }}>{wizardStep <= 2 ? "Suba o PDF do contador" : wizardStep === 3 ? "Importe o Excel da folha" : "Selecione um colaborador"}</div>
+                <div style={{ fontSize: 13, marginTop: 4 }}>{wizardStep <= 2 ? "Escolha o mês e envie o PDF na coluna ao lado" : wizardStep === 3 ? "Use o botão verde, ou clique em \"Revisar\" para pular esta etapa" : "Clique em um nome na lista para pré-visualizar o e-mail"}</div>
               </div>
             ) : (
               <div style={{ maxWidth: 680, margin: "0 auto" }}>
@@ -952,14 +1397,93 @@ export default function PayrollApp() {
               </div>
             )}
           </div>
+          </div>
         </div>
       )}
 
       {/* ============================================================ */}
-      {/* PROVENTOS TAB */}
+      {/* CONFIGURAÇÕES: SUB-ABAS */}
       {/* ============================================================ */}
-      {activeTab === "proventos" && (
-        <div style={{ display: "flex", height: "calc(100vh - 64px)" }}>
+      {view === "settings" && (
+        <div style={{ display: "flex", gap: 8, padding: "10px 24px", background: "#fff", borderBottom: "1px solid #E5E2DB" }}>
+          {[{ key: "colaboradores", label: "👥 Colaboradores" }, { key: "proventos", label: "💰 Proventos" }].map((t) => (
+            <button key={t.key} onClick={() => setSettingsTab(t.key)} style={{
+              padding: "8px 16px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: "1px solid",
+              borderColor: settingsTab === t.key ? "#1B2A4A" : "#E5E2DB", background: settingsTab === t.key ? "#1B2A4A" : "#fff",
+              color: settingsTab === t.key ? "#fff" : "#6B7280", cursor: "pointer",
+            }}>{t.label}</button>
+          ))}
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* CONFIGURAÇÕES: COLABORADORES */}
+      {/* ============================================================ */}
+      {view === "settings" && settingsTab === "colaboradores" && (
+        <div style={{ display: "flex", height: "calc(100vh - 113px)" }}>
+          {/* LEFT: lista */}
+          <div style={{ width: 380, borderRight: "1px solid #E5E2DB", display: "flex", flexDirection: "column", background: "#FFFFFF" }}>
+            <div style={{ padding: "16px 20px", borderBottom: "1px solid #E5E2DB" }}>
+              <button onClick={newCollab} style={{ width: "100%", padding: "10px", borderRadius: 8, background: "linear-gradient(135deg, #F59E0B, #EF4444)", color: "#fff", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, marginBottom: 10 }}>+ Adicionar colaborador</button>
+              <input type="text" placeholder="Buscar colaborador..." value={collabSearch} onChange={(e) => setCollabSearch(e.target.value)}
+                style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #E5E2DB", fontSize: 13, background: "#F8F7F4", outline: "none", boxSizing: "border-box" }} />
+            </div>
+            <div style={{ flex: 1, overflowY: "auto" }}>
+              {allCollaborators.filter((c) => c.full_name.toLowerCase().includes(collabSearch.toLowerCase()) || (c.email || "").toLowerCase().includes(collabSearch.toLowerCase())).map((c) => (
+                <div key={c.id} onClick={() => editExistingCollab(c)} style={{
+                  padding: "12px 20px", borderBottom: "1px solid #F3F0EB", cursor: "pointer",
+                  background: editCollab?.id === c.id ? "#FEF9EE" : "transparent",
+                  borderLeft: editCollab?.id === c.id ? "3px solid #F59E0B" : "3px solid transparent",
+                  opacity: c.is_active ? 1 : 0.5,
+                }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A" }}>{c.full_name}{!c.is_active && <span style={{ fontSize: 10, color: "#9CA3AF", marginLeft: 6 }}>(inativo)</span>}</div>
+                  <div style={{ fontSize: 11, color: c.email ? "#6B7280" : "#DC2626", fontWeight: c.email ? 400 : 600 }}>{c.email || "⚠ sem e-mail"}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* RIGHT: formulário */}
+          <div style={{ flex: 1, overflowY: "auto", padding: 32, background: "#EDEAE5" }}>
+            {!editCollab ? (
+              <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#9CA3AF" }}>
+                <span style={{ fontSize: 56, marginBottom: 16, opacity: 0.5 }}>👥</span>
+                <div style={{ fontSize: 18, fontWeight: 600, color: "#6B7280" }}>Selecione ou adicione um colaborador</div>
+                <div style={{ fontSize: 13, marginTop: 4 }}>Aqui você edita o e-mail e os dados de cada pessoa</div>
+              </div>
+            ) : (
+              <div style={{ maxWidth: 520, margin: "0 auto", background: "#fff", borderRadius: 12, padding: 28, border: "1px solid #D1D5DB" }}>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "#1B2A4A", marginBottom: 4 }}>{editCollab.id ? "Editar colaborador" : "Novo colaborador"}</div>
+                <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 20 }}>Código e CPF ajudam o PDF a casar com a pessoa certa.</div>
+                {[
+                  { f: "full_name", label: "Nome completo *", ph: "Nome completo" },
+                  { f: "email", label: "E-mail", ph: "email@exemplo.com" },
+                  { f: "role", label: "Cargo", ph: "Ex.: Professora" },
+                  { f: "employee_code", label: "Código (matrícula)", ph: "Ex.: 000002" },
+                  { f: "cpf", label: "CPF", ph: "000.000.000-00" },
+                ].map((fld) => (
+                  <div key={fld.f} style={{ marginBottom: 14 }}>
+                    <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", display: "block", marginBottom: 5 }}>{fld.label}</label>
+                    <input type="text" value={editCollab[fld.f] || ""} placeholder={fld.ph} onChange={(e) => updateEditCollabField(fld.f, e.target.value)}
+                      style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid #E5E2DB", fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+                  </div>
+                ))}
+                <div style={{ display: "flex", gap: 10, marginTop: 22 }}>
+                  <button onClick={saveCollab} disabled={savingCollab} style={{ flex: 1, padding: "12px", borderRadius: 10, background: savingCollab ? "#9CA3AF" : "linear-gradient(135deg, #22C55E, #16A34A)", color: "#fff", border: "none", cursor: savingCollab ? "default" : "pointer", fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>{savingCollab ? <><Spinner /> Salvando...</> : "✓ Salvar"}</button>
+                  {editCollab.id && (
+                    <button onClick={toggleCollabActive} style={{ padding: "12px 18px", borderRadius: 10, background: "#fff", color: editCollab.is_active ? "#DC2626" : "#16A34A", border: `2px solid ${editCollab.is_active ? "#FCA5A5" : "#6EE7B7"}`, cursor: "pointer", fontSize: 13, fontWeight: 700 }}>{editCollab.is_active ? "Desativar" : "Reativar"}</button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* PROVENTOS (em Configurações) */}
+      {/* ============================================================ */}
+      {view === "settings" && settingsTab === "proventos" && (
+        <div style={{ display: "flex", height: "calc(100vh - 113px)" }}>
           <div style={{ width: 380, borderRight: "1px solid #E5E2DB", display: "flex", flexDirection: "column", background: "#FFFFFF" }}>
             <div style={{ padding: "16px 20px", borderBottom: "1px solid #E5E2DB" }}>
               <div style={{ fontSize: 16, fontWeight: 700, color: "#1B2A4A", marginBottom: 10 }}>💰 Presets de Proventos</div>
