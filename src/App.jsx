@@ -705,15 +705,21 @@ export default function PayrollApp() {
       }
       saveMappings(mappings);
 
-      // 2) aplicar os ajustes nos contracheques do mês atual (substitui os existentes)
-      let applied = 0, noPaycheck = 0;
+      // 2) aplicar nos contracheques do mês: o Salário Líquido do Excel é a base
+      // OFICIAL (substitui o que veio do PDF) e os ajustes substituem os existentes
+      let applied = 0, noPaycheck = 0, baseUpdated = 0;
       for (const r of importRows) {
-        if (r.ignored || !r.collabId || !r.items?.length) continue;
+        if (r.ignored || !r.collabId) continue;
+        if (!r.items?.length && r.salario == null) continue;
         const pc = paychecks.find((p) => p.collaborator_id === r.collabId);
         if (!pc) { noPaycheck++; continue; }
+        if (r.salario != null && Math.abs((pc.extracted_net_value || 0) - r.salario) > 0.005) {
+          await supabase.update("paychecks", pc.id, { extracted_net_value: r.salario, final_value: r.salario });
+          baseUpdated++;
+        }
         const existing = adjustments[pc.id] || [];
         for (const a of existing) { await supabase.delete("adjustments", a.id); }
-        for (const it of r.items) {
+        for (const it of r.items || []) {
           await supabase.insert("adjustments", {
             paycheck_id: pc.id, type: it.type, description: it.description,
             value: it.value, category: it.category,
@@ -724,6 +730,7 @@ export default function PayrollApp() {
       await loadPaychecks();
       setShowImportModal(false); setImportRows([]); setImporting(false);
       let msg = `Importação concluída — ${applied} contracheque(s) atualizado(s).`;
+      if (baseUpdated > 0) msg += ` Salário líquido do Excel aplicado em ${baseUpdated} (substituiu o valor do PDF).`;
       if (noPaycheck > 0) msg += ` ${noPaycheck} colaborador(es) sem contracheque neste mês (suba o PDF primeiro).`;
       setImportNote(msg); setWizardStep(5);
     } catch (err) {
@@ -1262,7 +1269,10 @@ export default function PayrollApp() {
               {importRows.map((r) => {
                 const pc = r.collabId ? paychecks.find((p) => p.collaborator_id === r.collabId) : null;
                 const excelTotal = r.grandTotal != null ? r.grandTotal : r.computedTotal;
-                const sysTotal = pc ? (pc.extracted_net_value || 0) + (r.sumSigned || 0) : null;
+                // Base = salário líquido do EXCEL (vai substituir o do PDF na importação)
+                const base = r.salario != null ? r.salario : (pc ? pc.extracted_net_value || 0 : null);
+                const sysTotal = pc != null && base != null ? base + (r.sumSigned || 0) : null;
+                const baseMuda = pc && r.salario != null && Math.abs((pc.extracted_net_value || 0) - r.salario) > 0.005;
                 let badge;
                 if (r.ignored) badge = { t: "Ignorado", c: "#6B7280", bg: "#F3F4F6" };
                 else if (!r.collabId) badge = { t: "Selecione", c: "#991B1B", bg: "#FEE2E2" };
@@ -1286,6 +1296,7 @@ export default function PayrollApp() {
                     <div style={{ width: 150, textAlign: "right", flexShrink: 0 }}>
                       <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 12, color: badge.c, background: badge.bg, whiteSpace: "nowrap" }}>{badge.t}</span>
                       {pc && <div style={{ fontSize: 10, color: diverge ? "#DC2626" : "#9CA3AF", marginTop: 3, fontFamily: "'JetBrains Mono', monospace" }}>{formatCurrency(sysTotal)}{diverge ? ` ≠ ${formatCurrency(excelTotal)}` : ""}</div>}
+                      {baseMuda && <div style={{ fontSize: 10, color: "#2563EB", marginTop: 2 }} title="O salário líquido do Excel substituirá o do PDF">líquido: {formatCurrency(pc.extracted_net_value)} → {formatCurrency(r.salario)}</div>}
                     </div>
                   </div>
                 );
