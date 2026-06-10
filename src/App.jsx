@@ -476,7 +476,7 @@ export default function PayrollApp() {
     try {
       const payload = {
         full_name: editCollab.full_name.trim(),
-        email: editCollab.email?.trim() || null,
+        email: editCollab.email?.trim() || "",
         role: editCollab.role?.trim() || null,
         employee_code: editCollab.employee_code?.trim() || null,
         cpf: editCollab.cpf?.trim() || null,
@@ -603,7 +603,7 @@ export default function PayrollApp() {
           if (!collab) {
             const createdC = await supabase.insert("collaborators", {
               full_name: emp.employee_name || "Sem nome",
-              email: null,
+              email: "", // coluna NOT NULL no banco — vazio = "falta e-mail" na conferência
               cpf: emp.cpf || null,
               employee_code: emp.employee_code || null,
               role: emp.role || null,
@@ -789,14 +789,14 @@ export default function PayrollApp() {
     try {
       // Cadastro já foi criado no upload do PDF — aqui só completa o e-mail.
       if (emp._collabId) {
-        await supabase.update("collaborators", emp._collabId, { email: emp._email?.trim() || null });
+        await supabase.update("collaborators", emp._collabId, { email: emp._email?.trim() || "" });
         await loadCollaborators(); await loadAllCollaborators();
         setReconcile((prev) => ({ ...prev, novos: prev.novos.filter((_, i) => i !== idx) }));
         return;
       }
       const created = await supabase.insert("collaborators", {
         full_name: emp.employee_name || "Sem nome",
-        email: emp._email?.trim() || null,
+        email: emp._email?.trim() || "",
         cpf: emp.cpf || null,
         employee_code: emp.employee_code || null,
         role: emp.role || null,
@@ -878,6 +878,14 @@ export default function PayrollApp() {
 
   const sendBatchEmails = async () => {
     if (!currentPeriodId) return;
+    const semEmail = paychecks
+      .filter((p) => p.status === "reviewed")
+      .map((p) => findCollab(p))
+      .filter((c) => c && !(c.email || "").trim());
+    if (semEmail.length > 0) {
+      const nomes = semEmail.map((c) => c.full_name).join(", ");
+      if (!window.confirm(`${semEmail.length} colaborador(es) validado(s) estão SEM e-mail: ${nomes}.\n\nO envio deles vai falhar. Preencha o e-mail na conferência ou em Configurações.\n\nEnviar mesmo assim para os demais?`)) return;
+    }
     setSending(true); setError(null);
     try {
       const res = await fetch(CONFIG.N8N_WEBHOOK_SEND_EMAILS, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ period_id: currentPeriodId }) });
