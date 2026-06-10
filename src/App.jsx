@@ -1295,10 +1295,14 @@ export default function PayrollApp() {
                     <span style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A" }}>Upload do PDF de Contracheques</span>
                     <span style={{ fontSize: 11, color: "#94A3B8" }}>Selecione o mês/ano e clique aqui</span>
                   </label>
+                  <div style={{ textAlign: "center", fontSize: 12, color: "#6B7280", marginTop: 10, padding: "8px", borderRadius: 8, background: "#F8F7F4" }}>
+                    👥 <b>{collaborators.length}</b> colaborador{collaborators.length === 1 ? "" : "es"} ativo{collaborators.length === 1 ? "" : "s"} no cadastro
+                  </div>
                   </>)}
                   {paychecks.length > 0 && wizardStep === 3 && (
                     <div style={{ borderRadius: 12, border: "2px solid #BFDBFE", background: "#EFF6FF", padding: 16 }}>
                       <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2A4A", marginBottom: 4 }}>👥 Conferir colaboradores</div>
+                      <div style={{ fontSize: 12, color: "#1B2A4A", marginBottom: 6 }}><b>{paychecks.length}</b> contracheque{paychecks.length === 1 ? "" : "s"} neste mês · <b>{collaborators.length}</b> ativo{collaborators.length === 1 ? "" : "s"} no cadastro</div>
                       <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 12 }}>Veja quem é novo no PDF (complete o e-mail) e quem está cadastrado mas não veio neste mês (desativar ou manter).</div>
                       <button onClick={openReconcile} style={{ width: "100%", padding: "10px", borderRadius: 8, background: "#1B2A4A", color: "#fff", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Abrir conferência</button>
                       <button onClick={() => setWizardStep(4)} style={{ width: "100%", padding: "8px", borderRadius: 8, background: "#fff", color: "#1B2A4A", border: "1px solid #CBD5E1", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Tudo certo, continuar → Excel</button>
