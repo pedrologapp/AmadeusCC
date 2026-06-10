@@ -667,7 +667,20 @@ export default function PayrollApp() {
     const matchedIds = new Set(paychecks.map((p) => p.collaborator_id));
     const ausentes = collaborators.filter((c) => !matchedIds.has(c.id));
     const storagePath = lastStoragePath || paychecks[0]?.individual_pdf_path || "";
-    setReconcile({ periodId: currentPeriodId, storagePath, novos: lastNovos || [], ausentes });
+    // "Novos" vem do banco (tem contracheque no mês mas está sem e-mail), então a
+    // lista sobrevive a fechar o modal ou recarregar a página. lastNovos cobre só
+    // o caso raro de alguém do PDF cujo cadastro não pôde ser criado no upload.
+    const semEmail = collaborators
+      .filter((c) => matchedIds.has(c.id) && !(c.email || "").trim())
+      .map((c) => {
+        const pc = paychecks.find((p) => p.collaborator_id === c.id);
+        return {
+          employee_name: c.full_name, cpf: c.cpf, employee_code: c.employee_code,
+          role: c.role, net_salary: pc?.extracted_net_value, _email: "", _collabId: c.id,
+        };
+      });
+    const soDoUpload = (lastNovos || []).filter((n) => !n._collabId);
+    setReconcile({ periodId: currentPeriodId, storagePath, novos: [...semEmail, ...soDoUpload], ausentes });
   };
   const updateNovoEmail = (idx, val) => setReconcile((prev) => {
     const n = [...prev.novos]; n[idx] = { ...n[idx], _email: val }; return { ...prev, novos: n };
