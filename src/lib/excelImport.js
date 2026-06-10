@@ -59,6 +59,59 @@ function guessCategory(desc) {
   return 'other';
 }
 
+// Layout NOVO (gerado por scripts/build-new-excel.ps1): tabela Descrição | Tipo | Valor,
+// CPF na linha 4 e "TOTAL A RECEBER" com fórmula. Detectado pelo cabeçalho da tabela.
+function parseNewLayoutSheet(rows, sheetName, innerName, hdrRow) {
+  let cpf = '';
+  const cpfRow = findRow(rows, (s) => /^cpf\s*:/i.test(s.trim()));
+  if (cpfRow >= 0) {
+    const cell = rows[cpfRow].find((c) => typeof c === 'string' && /^cpf\s*:/i.test(c.trim()));
+    const digits = (cell || '').replace(/\D/g, '');
+    if (digits.length === 11) cpf = digits.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+  }
+
+  const salRow = findRow(rows, (s) => /sal[aá]rio l[ií]quido/i.test(s));
+  const salario = salRow >= 0 ? toNumber(rows[salRow][lastNumericCol(rows[salRow])]) : null;
+
+  const totRow = findRow(rows, (s) => /total a receber/i.test(s));
+  const grandTotal = totRow >= 0 ? toNumber(rows[totRow][lastNumericCol(rows[totRow])]) : null;
+
+  const items = [];
+  const end = totRow >= 0 ? totRow : rows.length;
+  for (let r = hdrRow + 1; r < end; r++) {
+    const desc = norm(rows[r][0]);
+    const tipo = norm(rows[r][1]);
+    const val = toNumber(rows[r][2]);
+    if (!desc || val == null || val === 0) continue;
+    // Tipo explícito manda; se a pessoa esqueceu de preencher, usa o sinal do valor.
+    const isDeduction = /desconto/i.test(tipo) || (!tipo && val < 0);
+    items.push({
+      description: desc,
+      value: round2(Math.abs(val)),
+      type: isDeduction ? 'deduction' : 'addition',
+      category: guessCategory(desc),
+    });
+  }
+
+  const sumSigned = items.reduce((s, it) => s + (it.type === 'addition' ? it.value : -it.value), 0);
+  const computedTotal = round2((salario || 0) + sumSigned);
+  const reconciles = grandTotal != null ? Math.abs(computedTotal - grandTotal) < 0.5 : null;
+
+  return {
+    sheetName,
+    innerName,
+    cpf,
+    salario,
+    aReceber: grandTotal,
+    items,
+    sumSigned: round2(sumSigned),
+    computedTotal,
+    grandTotal: grandTotal != null ? round2(grandTotal) : null,
+    reconciles,
+    hasData: salRow >= 0,
+  };
+}
+
 // Lê uma aba e devolve nome + lançamentos.
 function parseSheet(ws, sheetName) {
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
@@ -70,6 +123,14 @@ function parseSheet(ws, sheetName) {
     const cell = rows[funcRow].find((c) => typeof c === 'string' && /funcion/i.test(c));
     if (cell && cell.includes(':')) innerName = norm(cell.split(':').slice(1).join(':'));
   }
+
+  // Layout novo? Cabeçalho "Descrição | Tipo | Valor" presente.
+  const hdrRow = rows.findIndex(
+    (r) =>
+      typeof r[0] === 'string' && /descri/i.test(r[0]) &&
+      typeof r[1] === 'string' && /^tipo$/i.test(norm(r[1]))
+  );
+  if (hdrRow >= 0) return parseNewLayoutSheet(rows, sheetName, innerName, hdrRow);
 
   const salRow = findRow(rows, (s) => /sal[aá]rio l[ií]quido/i.test(s));
   let valCol = -1;
@@ -122,6 +183,7 @@ function parseSheet(ws, sheetName) {
   return {
     sheetName,
     innerName,
+    cpf: '',
     salario,
     aReceber,
     items,
@@ -158,8 +220,13 @@ export function normalizeName(s) {
     .trim();
 }
 
-// Sugere o colaborador para uma aba, casando o nome da aba (1º nome) com o cadastro.
-export function suggestCollaborator(sheetName, collaborators) {
+// Sugere o colaborador para uma aba: CPF primeiro (layout novo), depois nome.
+export function suggestCollaborator(sheetName, collaborators, cpf) {
+  if (cpf) {
+    const digits = String(cpf).replace(/\D/g, '');
+    const byCpf = collaborators.find((c) => c.cpf && c.cpf.replace(/\D/g, '') === digits);
+    if (byCpf) return byCpf;
+  }
   const sheet = normalizeName(sheetName).replace(/\(\d+\)/g, '').trim();
   const sheetFirst = sheet.split(' ')[0];
   // 1) match exato do começo do nome completo

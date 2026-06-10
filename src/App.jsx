@@ -528,11 +528,26 @@ export default function PayrollApp() {
       }
       const merged = Object.values(byKey);
 
-      // 6) Casa com o cadastro e cria os contracheques
+      // 6) Casa com o cadastro e cria os contracheques.
+      // Quem está no PDF mas NÃO tem cadastro: cria o cadastro na hora (sem e-mail)
+      // para o contracheque subir junto — nada do PDF fica de fora. O e-mail é
+      // completado depois na conferência de colaboradores.
       let created = 0; const dups = []; const novos = []; const matchedIds = new Set();
       for (const emp of merged) {
-        const collab = matchCollaborator(emp, collaborators);
-        if (!collab) { novos.push({ ...emp, _email: "" }); continue; }
+        let collab = matchCollaborator(emp, collaborators);
+        if (!collab) {
+          const createdC = await supabase.insert("collaborators", {
+            full_name: emp.employee_name || "Sem nome",
+            email: null,
+            cpf: emp.cpf || null,
+            employee_code: emp.employee_code || null,
+            role: emp.role || null,
+            is_active: true,
+          });
+          collab = createdC?.[0];
+          if (!collab) { novos.push({ ...emp, _email: "" }); continue; }
+          novos.push({ ...emp, _email: "", _collabId: collab.id });
+        }
         matchedIds.add(collab.id);
         const existing = await supabase.select("paychecks", `payroll_period_id=eq.${periodId}&collaborator_id=eq.${collab.id}`);
         if (existing.length > 0) { dups.push(collab.full_name); continue; }
@@ -560,10 +575,11 @@ export default function PayrollApp() {
       await supabase.update("payroll_periods", periodId, { status: "reviewing", pdf_total_pages: numPages });
       setCurrentPeriodId(periodId); setRefMonth(mes); setRefYear(ano);
       await loadPeriods(); await loadPaychecks(periodId); await loadPeriodStats();
+      if (novos.length) { await loadCollaborators(); await loadAllCollaborators(); }
       if (dups.length) setDuplicateWarnings(dups.map((d) => ({ collaborator: d })));
       setUploadProgress(""); setUploading(false); setWizardStep(3);
       let note = `${created} contracheque(s) criado(s) de ${numPages} páginas.`;
-      if (novos.length) note += ` ${novos.length} novo(s) no PDF.`;
+      if (novos.length) note += ` ${novos.length} colaborador(es) novo(s) cadastrado(s) automaticamente — complete o e-mail na conferência.`;
       setImportNote(note);
       setLastNovos(novos); setLastStoragePath(storagePath);
       if (novos.length || ausentes.length) setReconcile({ periodId, storagePath, novos, ausentes });
@@ -589,7 +605,7 @@ export default function PayrollApp() {
         const saved = mappings[s.sheetName];
         if (saved === "IGNORE") return { ...s, collabId: "", ignored: true };
         if (saved && collaborators.some((c) => c.id === saved)) return { ...s, collabId: saved, ignored: false };
-        const sug = suggestCollaborator(s.sheetName, collaborators);
+        const sug = suggestCollaborator(s.sheetName, collaborators, s.cpf);
         return { ...s, collabId: sug ? sug.id : "", ignored: false };
       });
       setImportRows(rows);
@@ -659,6 +675,13 @@ export default function PayrollApp() {
   const addNovoFromPdf = async (idx) => {
     const emp = reconcile.novos[idx];
     try {
+      // Cadastro já foi criado no upload do PDF — aqui só completa o e-mail.
+      if (emp._collabId) {
+        await supabase.update("collaborators", emp._collabId, { email: emp._email?.trim() || null });
+        await loadCollaborators(); await loadAllCollaborators();
+        setReconcile((prev) => ({ ...prev, novos: prev.novos.filter((_, i) => i !== idx) }));
+        return;
+      }
       const created = await supabase.insert("collaborators", {
         full_name: emp.employee_name || "Sem nome",
         email: emp._email?.trim() || null,
@@ -1174,17 +1197,17 @@ export default function PayrollApp() {
               <button onClick={() => setReconcile(null)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#9CA3AF" }}>✕</button>
             </div>
             <div style={{ overflowY: "auto", padding: "16px 24px", flex: 1 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: "#16A34A", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>➕ Novos no PDF (sem cadastro) — {reconcile.novos.length}</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#16A34A", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>➕ Novos no PDF — {reconcile.novos.length}</div>
               {reconcile.novos.length === 0 ? (
                 <div style={{ fontSize: 13, color: "#9CA3AF", marginBottom: 16 }}>Nenhum novo — todos do PDF já estão cadastrados.</div>
               ) : reconcile.novos.map((n, idx) => (
                 <div key={idx} style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 10, padding: "12px 14px", marginBottom: 10 }}>
                   <div style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A" }}>{n.employee_name || "Sem nome"}</div>
-                  <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 8 }}>{n.cpf ? `CPF ${n.cpf}` : "sem CPF"}{n.employee_code ? ` · cód ${n.employee_code}` : ""}{n.role ? ` · ${n.role}` : ""} · líquido {formatCurrency(n.net_salary)}</div>
+                  <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 8 }}>{n.cpf ? `CPF ${n.cpf}` : "sem CPF"}{n.employee_code ? ` · cód ${n.employee_code}` : ""}{n.role ? ` · ${n.role}` : ""} · líquido {formatCurrency(n.net_salary)}{n._collabId ? " · cadastro e contracheque já criados" : ""}</div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <input type="email" placeholder="e-mail (para enviar o contracheque)" value={n._email || ""} onChange={(e) => updateNovoEmail(idx, e.target.value)}
                       style={{ flex: 1, padding: "7px 10px", borderRadius: 8, border: "1px solid #E5E2DB", fontSize: 12, outline: "none" }} />
-                    <button onClick={() => addNovoFromPdf(idx)} style={{ padding: "7px 14px", borderRadius: 8, background: "#16A34A", color: "#fff", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>✓ Adicionar</button>
+                    <button onClick={() => addNovoFromPdf(idx)} style={{ padding: "7px 14px", borderRadius: 8, background: "#16A34A", color: "#fff", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{n._collabId ? "✓ Salvar e-mail" : "✓ Adicionar"}</button>
                   </div>
                 </div>
               ))}
