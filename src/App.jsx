@@ -24,32 +24,39 @@ const supabase = {
     if (!res.ok) throw new Error(`Supabase select error: ${res.statusText}`);
     return res.json();
   },
+  // Em HTTP/2 o statusText vem vazio — o motivo real está no corpo da resposta.
+  async fail(res, action) {
+    const body = await res.text().catch(() => "");
+    let msg = body;
+    try { msg = JSON.parse(body).message || body; } catch { /* corpo não é JSON */ }
+    throw new Error(`Supabase ${action} (${res.status}): ${String(msg).slice(0, 300)}`);
+  },
   async insert(table, data) {
     const res = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}`, {
       method: "POST", headers: this.headers, body: JSON.stringify(data),
     });
-    if (!res.ok) throw new Error(`Supabase insert error: ${res.statusText}`);
+    if (!res.ok) await this.fail(res, `insert em ${table}`);
     return res.json();
   },
   async update(table, id, data) {
     const res = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, {
       method: "PATCH", headers: this.headers, body: JSON.stringify(data),
     });
-    if (!res.ok) throw new Error(`Supabase update error: ${res.statusText}`);
+    if (!res.ok) await this.fail(res, `update em ${table}`);
     return res.json();
   },
   async delete(table, id) {
     const res = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, {
       method: "DELETE", headers: this.headers,
     });
-    if (!res.ok) throw new Error(`Supabase delete error: ${res.statusText}`);
+    if (!res.ok) await this.fail(res, `delete em ${table}`);
     return true;
   },
   async deleteWhere(table, filters) {
     const res = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?${filters}`, {
       method: "DELETE", headers: this.headers,
     });
-    if (!res.ok) throw new Error(`Supabase delete error: ${res.statusText}`);
+    if (!res.ok) await this.fail(res, `delete em ${table}`);
     return true;
   },
 };
@@ -86,15 +93,24 @@ const getPdfPageCount = async (arrayBuffer) => {
   return pdf.numPages;
 };
 
-// Casa um colaborador extraído pela IA com o cadastro (código -> CPF -> nome)
+// Casa um colaborador extraído pela IA com o cadastro (código -> CPF -> nome).
+// Tolerante a formatação: CPF compara só dígitos, código ignora zeros à
+// esquerda, nome ignora acentos — a IA nem sempre extrai igual ao cadastro.
+const onlyDigits = (s) => (s == null ? "" : String(s)).replace(/\D/g, "");
+const plainName = (s) => (s == null ? "" : String(s)).normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase().replace(/\s+/g, " ").trim();
 const matchCollaborator = (emp, collaborators) => {
-  let m = collaborators.find((c) => c.employee_code && emp.employee_code && c.employee_code === emp.employee_code);
-  if (!m && emp.cpf) m = collaborators.find((c) => c.cpf && c.cpf === emp.cpf);
+  const code = onlyDigits(emp.employee_code).replace(/^0+/, "");
+  let m = code ? collaborators.find((c) => {
+    const cc = onlyDigits(c.employee_code).replace(/^0+/, "");
+    return cc && cc === code;
+  }) : null;
+  const cpf = onlyDigits(emp.cpf);
+  if (!m && cpf) m = collaborators.find((c) => onlyDigits(c.cpf) === cpf);
   if (!m && emp.employee_name) {
-    const name = emp.employee_name.toUpperCase().trim();
+    const name = plainName(emp.employee_name);
     m = collaborators.find((c) => {
-      const cn = (c.full_name || "").toUpperCase().trim();
-      return cn === name || cn.includes(name) || name.includes(cn);
+      const cn = plainName(c.full_name);
+      return cn && (cn === name || cn.includes(name) || name.includes(cn));
     });
   }
   return m || null;
@@ -551,54 +567,71 @@ export default function PayrollApp() {
       // Quem está no PDF mas NÃO tem cadastro: cria o cadastro na hora (sem e-mail)
       // para o contracheque subir junto — nada do PDF fica de fora. O e-mail é
       // completado depois na conferência de colaboradores.
+      // Casa contra TODOS (inclusive inativos, direto do banco): se um inativo
+      // voltou a aparecer no PDF, reativa em vez de criar cadastro duplicado.
+      // Uma falha individual não derruba o lote: registra e segue.
+      const allCollabs = await supabase.select("collaborators", "", "full_name.asc");
       let created = 0; const dups = []; const novos = []; const matchedIds = new Set();
+      const reativados = []; const falhas = [];
       for (const emp of merged) {
-        let collab = matchCollaborator(emp, collaborators);
-        if (!collab) {
-          const createdC = await supabase.insert("collaborators", {
-            full_name: emp.employee_name || "Sem nome",
-            email: null,
-            cpf: emp.cpf || null,
-            employee_code: emp.employee_code || null,
-            role: emp.role || null,
-            is_active: true,
+        try {
+          let collab = matchCollaborator(emp, allCollabs);
+          if (collab && collab.is_active === false) {
+            await supabase.update("collaborators", collab.id, { is_active: true });
+            collab.is_active = true;
+            reativados.push(collab.full_name);
+          }
+          if (!collab) {
+            const createdC = await supabase.insert("collaborators", {
+              full_name: emp.employee_name || "Sem nome",
+              email: null,
+              cpf: emp.cpf || null,
+              employee_code: emp.employee_code || null,
+              role: emp.role || null,
+              is_active: true,
+            });
+            collab = createdC?.[0];
+            if (!collab) { novos.push({ ...emp, _email: "" }); continue; }
+            allCollabs.push(collab);
+            novos.push({ ...emp, _email: "", _collabId: collab.id });
+          }
+          matchedIds.add(collab.id);
+          const existing = await supabase.select("paychecks", `payroll_period_id=eq.${periodId}&collaborator_id=eq.${collab.id}`);
+          if (existing.length > 0) { dups.push(collab.full_name); continue; }
+          const pageNums = (emp.pages && emp.pages.length) ? emp.pages : [1];
+          await supabase.insert("paychecks", {
+            payroll_period_id: periodId,
+            collaborator_id: collab.id,
+            extracted_gross_value: emp.gross_salary,
+            extracted_deductions: emp.total_deductions,
+            extracted_net_value: emp.net_salary,
+            final_value: emp.net_salary,
+            ai_confidence_score: 0.95,
+            individual_pdf_path: storagePath,
+            pdf_page_number: pageNums[0],
+            page_numbers: pageNums,
+            status: "extracted",
+            ai_extracted_data: JSON.stringify(emp.details || []),
           });
-          collab = createdC?.[0];
-          if (!collab) { novos.push({ ...emp, _email: "" }); continue; }
-          novos.push({ ...emp, _email: "", _collabId: collab.id });
+          created++;
+        } catch (err) {
+          falhas.push(`${emp.employee_name || "(sem nome)"}: ${err.message}`);
         }
-        matchedIds.add(collab.id);
-        const existing = await supabase.select("paychecks", `payroll_period_id=eq.${periodId}&collaborator_id=eq.${collab.id}`);
-        if (existing.length > 0) { dups.push(collab.full_name); continue; }
-        const pageNums = (emp.pages && emp.pages.length) ? emp.pages : [1];
-        await supabase.insert("paychecks", {
-          payroll_period_id: periodId,
-          collaborator_id: collab.id,
-          extracted_gross_value: emp.gross_salary,
-          extracted_deductions: emp.total_deductions,
-          extracted_net_value: emp.net_salary,
-          final_value: emp.net_salary,
-          ai_confidence_score: 0.95,
-          individual_pdf_path: storagePath,
-          pdf_page_number: pageNums[0],
-          page_numbers: pageNums,
-          status: "extracted",
-          ai_extracted_data: JSON.stringify(emp.details || []),
-        });
-        created++;
       }
       // quem está no cadastro (ativo) mas não apareceu neste PDF
-      const ausentes = collaborators.filter((c) => !matchedIds.has(c.id));
+      const ausentes = allCollabs.filter((c) => c.is_active && !matchedIds.has(c.id));
 
       // 7) Fecha o período e atualiza a tela
       await supabase.update("payroll_periods", periodId, { status: "reviewing", pdf_total_pages: numPages });
       setCurrentPeriodId(periodId); setRefMonth(mes); setRefYear(ano);
       await loadPeriods(); await loadPaychecks(periodId); await loadPeriodStats();
-      if (novos.length) { await loadCollaborators(); await loadAllCollaborators(); }
+      if (novos.length || reativados.length) { await loadCollaborators(); await loadAllCollaborators(); }
       if (dups.length) setDuplicateWarnings(dups.map((d) => ({ collaborator: d })));
       setUploadProgress(""); setUploading(false); setWizardStep(3);
       let note = `${created} contracheque(s) criado(s) de ${numPages} páginas.`;
       if (novos.length) note += ` ${novos.length} colaborador(es) novo(s) cadastrado(s) automaticamente — complete o e-mail na conferência.`;
+      if (reativados.length) note += ` Reativado(s): ${reativados.join(", ")}.`;
+      if (falhas.length) setError(`${falhas.length} contracheque(s) não entraram: ${falhas.join(" | ")}`);
       setImportNote(note);
       setLastNovos(novos); setLastStoragePath(storagePath);
       if (novos.length || ausentes.length) setReconcile({ periodId, storagePath, novos, ausentes });
