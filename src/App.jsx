@@ -531,19 +531,38 @@ export default function PayrollApp() {
       else { period = (await supabase.insert("payroll_periods", { reference_month: mes, reference_year: ano, status: "processing" }))[0]; }
       const periodId = period.id;
 
-      // 4) Lê o PDF em lotes de páginas, chamando nossa função no Vercel
+      // 4) Lê o PDF em lotes de páginas, chamando nossa função no Vercel.
+      // A IA às vezes falha de forma passageira (sobrecarga/timeout), então cada
+      // lote tem 3 tentativas antes de desistir. Erros de plataforma podem vir
+      // como objeto — sempre convertemos para texto legível.
       const BATCH = 6;
+      const TENTATIVAS = 3;
       const all = [];
       for (let start = 1; start <= numPages; start += BATCH) {
         const batchPages = [];
         for (let p = start; p < start + BATCH && p <= numPages; p++) batchPages.push(p);
-        setUploadProgress(`A IA está lendo as páginas ${start}–${batchPages[batchPages.length - 1]} de ${numPages}...`);
-        const r = await fetch(`${CONFIG.API_BASE}/api/extract-payroll`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pdf_url: pdfUrl, pages: batchPages, origin: CONFIG.API_BASE }),
-        });
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || "Erro ao ler as páginas");
+        const fim = batchPages[batchPages.length - 1];
+        let data = null; let lastErr = null;
+        for (let tent = 1; tent <= TENTATIVAS; tent++) {
+          setUploadProgress(`A IA está lendo as páginas ${start}–${fim} de ${numPages}...${tent > 1 ? ` (tentativa ${tent})` : ""}`);
+          try {
+            const r = await fetch(`${CONFIG.API_BASE}/api/extract-payroll`, {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ pdf_url: pdfUrl, pages: batchPages, origin: CONFIG.API_BASE }),
+            });
+            const raw = await r.text();
+            let d = {}; try { d = JSON.parse(raw); } catch { d = { error: raw.slice(0, 200) }; }
+            if (!r.ok) {
+              const e = d.error;
+              throw new Error(typeof e === "string" && e ? e : e ? JSON.stringify(e).slice(0, 200) : `HTTP ${r.status}`);
+            }
+            data = d; lastErr = null; break;
+          } catch (err) {
+            lastErr = err;
+            if (tent < TENTATIVAS) await new Promise((ok) => setTimeout(ok, 2500 * tent));
+          }
+        }
+        if (lastErr) throw new Error(`Páginas ${start}–${fim}: ${lastErr.message}`);
         if (Array.isArray(data.employees)) all.push(...data.employees);
       }
 
