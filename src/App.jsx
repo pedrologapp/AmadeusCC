@@ -1583,6 +1583,10 @@ export default function PayrollApp() {
                           <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #E5E2DB", fontSize: 14 }}><span>Descontos</span><span style={{ fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: "#DC2626" }}>− {formatCurrency(selectedPaycheck.extracted_deductions)}</span></div>
                         </>
                       )}
+                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, paddingTop: 10, borderTop: "2px solid #CBD5E1", fontSize: 15, fontWeight: 700 }}>
+                        <span style={{ color: "#1B2A4A" }}>Salário Líquido</span>
+                        <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#1B2A4A" }}>{formatCurrency(selectedPaycheck.extracted_net_value)}</span>
+                      </div>
                       {selectedAdjustments.length > 0 && (
                         <div style={{ marginTop: 16, paddingTop: 16, borderTop: "2px dashed #E5E2DB" }}>
                           <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#F59E0B", marginBottom: 8 }}>Ajustes Adicionais</div>
