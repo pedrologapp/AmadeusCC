@@ -272,6 +272,11 @@ export default function PayrollApp() {
   const [importing, setImporting] = useState(false);
   const [importNote, setImportNote] = useState("");
 
+  // Conferência de colaboradores (novos no PDF / ausentes no mês)
+  const [reconcile, setReconcile] = useState(null); // { periodId, storagePath, novos:[], ausentes:[] }
+  const [lastNovos, setLastNovos] = useState([]);
+  const [lastStoragePath, setLastStoragePath] = useState("");
+
   // Navegação (Fase 2): painel de meses x assistente
   const [view, setView] = useState("dashboard"); // "dashboard" | "process"
   const [periodStats, setPeriodStats] = useState({});
@@ -524,10 +529,11 @@ export default function PayrollApp() {
       const merged = Object.values(byKey);
 
       // 6) Casa com o cadastro e cria os contracheques
-      let created = 0, unmatched = 0; const dups = [];
+      let created = 0; const dups = []; const novos = []; const matchedIds = new Set();
       for (const emp of merged) {
         const collab = matchCollaborator(emp, collaborators);
-        if (!collab) { unmatched++; continue; }
+        if (!collab) { novos.push({ ...emp, _email: "" }); continue; }
+        matchedIds.add(collab.id);
         const existing = await supabase.select("paychecks", `payroll_period_id=eq.${periodId}&collaborator_id=eq.${collab.id}`);
         if (existing.length > 0) { dups.push(collab.full_name); continue; }
         const pageNums = (emp.pages && emp.pages.length) ? emp.pages : [1];
@@ -547,6 +553,8 @@ export default function PayrollApp() {
         });
         created++;
       }
+      // quem está no cadastro (ativo) mas não apareceu neste PDF
+      const ausentes = collaborators.filter((c) => !matchedIds.has(c.id));
 
       // 7) Fecha o período e atualiza a tela
       await supabase.update("payroll_periods", periodId, { status: "reviewing", pdf_total_pages: numPages });
@@ -555,8 +563,10 @@ export default function PayrollApp() {
       if (dups.length) setDuplicateWarnings(dups.map((d) => ({ collaborator: d })));
       setUploadProgress(""); setUploading(false); setWizardStep(3);
       let note = `${created} contracheque(s) criado(s) de ${numPages} páginas.`;
-      if (unmatched > 0) note += ` ${unmatched} colaborador(es) não reconhecido(s) — cadastre em ⚙️ Configurações e suba de novo.`;
+      if (novos.length) note += ` ${novos.length} novo(s) no PDF.`;
       setImportNote(note);
+      setLastNovos(novos); setLastStoragePath(storagePath);
+      if (novos.length || ausentes.length) setReconcile({ periodId, storagePath, novos, ausentes });
     } catch (err) {
       setError(`Erro: ${err.message}`); setUploading(false); setUploadProgress("");
     }
@@ -633,6 +643,61 @@ export default function PayrollApp() {
       setError(`Erro ao importar: ${err.message}`); setImporting(false);
     }
   };
+
+  // ============================================================
+  // Conferência de colaboradores (novos / ausentes)
+  // ============================================================
+  const openReconcile = () => {
+    const matchedIds = new Set(paychecks.map((p) => p.collaborator_id));
+    const ausentes = collaborators.filter((c) => !matchedIds.has(c.id));
+    const storagePath = lastStoragePath || paychecks[0]?.individual_pdf_path || "";
+    setReconcile({ periodId: currentPeriodId, storagePath, novos: lastNovos || [], ausentes });
+  };
+  const updateNovoEmail = (idx, val) => setReconcile((prev) => {
+    const n = [...prev.novos]; n[idx] = { ...n[idx], _email: val }; return { ...prev, novos: n };
+  });
+  const addNovoFromPdf = async (idx) => {
+    const emp = reconcile.novos[idx];
+    try {
+      const created = await supabase.insert("collaborators", {
+        full_name: emp.employee_name || "Sem nome",
+        email: emp._email?.trim() || null,
+        cpf: emp.cpf || null,
+        employee_code: emp.employee_code || null,
+        role: emp.role || null,
+        is_active: true,
+      });
+      const collab = created?.[0];
+      if (collab && reconcile.periodId) {
+        const pageNums = (emp.pages && emp.pages.length) ? emp.pages : [1];
+        await supabase.insert("paychecks", {
+          payroll_period_id: reconcile.periodId,
+          collaborator_id: collab.id,
+          extracted_gross_value: emp.gross_salary,
+          extracted_deductions: emp.total_deductions,
+          extracted_net_value: emp.net_salary,
+          final_value: emp.net_salary,
+          ai_confidence_score: 0.95,
+          individual_pdf_path: reconcile.storagePath,
+          pdf_page_number: pageNums[0],
+          page_numbers: pageNums,
+          status: "extracted",
+          ai_extracted_data: JSON.stringify(emp.details || []),
+        });
+      }
+      await loadCollaborators(); await loadAllCollaborators(); await loadPaychecks(); await loadPeriodStats();
+      setReconcile((prev) => ({ ...prev, novos: prev.novos.filter((_, i) => i !== idx) }));
+    } catch (err) { setError(`Erro ao adicionar: ${err.message}`); }
+  };
+  const deactivateAusente = async (idx) => {
+    const c = reconcile.ausentes[idx];
+    try {
+      await supabase.update("collaborators", c.id, { is_active: false });
+      await loadCollaborators(); await loadAllCollaborators();
+      setReconcile((prev) => ({ ...prev, ausentes: prev.ausentes.filter((_, i) => i !== idx) }));
+    } catch (err) { setError(`Erro: ${err.message}`); }
+  };
+  const dismissAusente = (idx) => setReconcile((prev) => ({ ...prev, ausentes: prev.ausentes.filter((_, i) => i !== idx) }));
 
   const addAdjustment = async () => {
     if (!selectedPaycheckId || !newAdj.value) return;
@@ -1096,6 +1161,59 @@ export default function PayrollApp() {
       )}
 
       {/* ============================================================ */}
+      {/* CONFERÊNCIA DE COLABORADORES */}
+      {/* ============================================================ */}
+      {reconcile && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={() => setReconcile(null)}>
+          <div style={{ background: "#fff", borderRadius: 16, width: 640, maxHeight: "85vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ padding: "20px 24px", borderBottom: "1px solid #E5E2DB", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#1B2A4A" }}>Conferência de colaboradores — {periodLabel}</div>
+                <div style={{ fontSize: 12, color: "#6B7280", marginTop: 2 }}>Compare quem apareceu no PDF com o cadastro</div>
+              </div>
+              <button onClick={() => setReconcile(null)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#9CA3AF" }}>✕</button>
+            </div>
+            <div style={{ overflowY: "auto", padding: "16px 24px", flex: 1 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#16A34A", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>➕ Novos no PDF (sem cadastro) — {reconcile.novos.length}</div>
+              {reconcile.novos.length === 0 ? (
+                <div style={{ fontSize: 13, color: "#9CA3AF", marginBottom: 16 }}>Nenhum novo — todos do PDF já estão cadastrados.</div>
+              ) : reconcile.novos.map((n, idx) => (
+                <div key={idx} style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 10, padding: "12px 14px", marginBottom: 10 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A" }}>{n.employee_name || "Sem nome"}</div>
+                  <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 8 }}>{n.cpf ? `CPF ${n.cpf}` : "sem CPF"}{n.employee_code ? ` · cód ${n.employee_code}` : ""}{n.role ? ` · ${n.role}` : ""} · líquido {formatCurrency(n.net_salary)}</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input type="email" placeholder="e-mail (para enviar o contracheque)" value={n._email || ""} onChange={(e) => updateNovoEmail(idx, e.target.value)}
+                      style={{ flex: 1, padding: "7px 10px", borderRadius: 8, border: "1px solid #E5E2DB", fontSize: 12, outline: "none" }} />
+                    <button onClick={() => addNovoFromPdf(idx)} style={{ padding: "7px 14px", borderRadius: 8, background: "#16A34A", color: "#fff", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>✓ Adicionar</button>
+                  </div>
+                </div>
+              ))}
+
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#DC2626", textTransform: "uppercase", letterSpacing: 0.5, margin: "18px 0 8px" }}>➖ Ausentes neste mês (cadastrados ativos) — {reconcile.ausentes.length}</div>
+              <div style={{ fontSize: 11, color: "#9CA3AF", marginBottom: 10 }}>Não apareceram no PDF deste mês. Pode ser que saíram — ou só estão de férias/afastados. Você decide.</div>
+              {reconcile.ausentes.length === 0 ? (
+                <div style={{ fontSize: 13, color: "#9CA3AF" }}>Ninguém ausente — todos os ativos apareceram no PDF.</div>
+              ) : reconcile.ausentes.map((c, idx) => (
+                <div key={c.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, padding: "10px 14px", marginBottom: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A" }}>{c.full_name}</div>
+                    <div style={{ fontSize: 11, color: "#6B7280" }}>{c.role || ""}</div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={() => dismissAusente(idx)} style={{ padding: "6px 10px", borderRadius: 8, background: "#fff", color: "#6B7280", border: "1px solid #D1D5DB", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Manter</button>
+                    <button onClick={() => deactivateAusente(idx)} style={{ padding: "6px 10px", borderRadius: 8, background: "#fff", color: "#DC2626", border: "1px solid #FCA5A5", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>Desativar</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ padding: "14px 24px", borderTop: "1px solid #E5E2DB", display: "flex", justifyContent: "flex-end" }}>
+              <button onClick={() => setReconcile(null)} style={{ padding: "10px 18px", borderRadius: 8, background: "#1B2A4A", color: "#fff", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>Concluir</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
       {/* CONTRACHEQUES TAB */}
       {/* ============================================================ */}
       {view === "process" && activeTab === "contracheques" && (
@@ -1162,6 +1280,12 @@ export default function PayrollApp() {
                     <div style={{ fontSize: 9, color: "#6B7280", fontWeight: 500, textTransform: "uppercase", letterSpacing: 0.5 }}>{s.label}</div>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {paychecks.length > 0 && wizardStep >= 3 && (
+              <div style={{ padding: "10px 20px", borderBottom: "1px solid #E5E2DB" }}>
+                <button onClick={openReconcile} style={{ width: "100%", padding: "8px", borderRadius: 8, background: "#fff", color: "#1B2A4A", border: "1px solid #CBD5E1", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>👥 Conferir colaboradores (novos / ausentes)</button>
               </div>
             )}
 
