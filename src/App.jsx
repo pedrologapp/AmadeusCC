@@ -102,9 +102,10 @@ const MONTH_NAMES = [
 const WIZARD_STEPS = [
   { n: 1, label: "Mês" },
   { n: 2, label: "PDF" },
-  { n: 3, label: "Excel" },
-  { n: 4, label: "Revisar" },
-  { n: 5, label: "Enviar" },
+  { n: 3, label: "Conferir" },
+  { n: 4, label: "Excel" },
+  { n: 5, label: "Revisar" },
+  { n: 6, label: "Enviar" },
 ];
 
 const ADJUSTMENT_CATEGORIES = [
@@ -280,7 +281,7 @@ export default function PayrollApp() {
   // Navegação (Fase 2): painel de meses x assistente
   const [view, setView] = useState("dashboard"); // "dashboard" | "process"
   const [periodStats, setPeriodStats] = useState({});
-  const [wizardStep, setWizardStep] = useState(1); // 1..5
+  const [wizardStep, setWizardStep] = useState(1); // 1..6
 
   // Configurações (Fase 2c): colaboradores + proventos
   const [settingsTab, setSettingsTab] = useState("colaboradores"); // "colaboradores" | "proventos"
@@ -408,9 +409,9 @@ export default function PayrollApp() {
     setRefMonth(period.reference_month); setRefYear(period.reference_year);
     setActiveTab("contracheques"); setSelectedPaycheckId(null);
     const s = periodStats[period.id];
-    let step = 4;
+    let step = 5;
     if (!s || s.total === 0) step = 2;
-    else if (s.pending === 0 && (s.reviewed > 0 || s.sent > 0)) step = 5;
+    else if (s.pending === 0 && (s.reviewed > 0 || s.sent > 0)) step = 6;
     setWizardStep(step);
     setError(null); setImportNote(""); setDuplicateWarnings([]); setView("process");
   };
@@ -654,7 +655,7 @@ export default function PayrollApp() {
       setShowImportModal(false); setImportRows([]); setImporting(false);
       let msg = `Importação concluída — ${applied} contracheque(s) atualizado(s).`;
       if (noPaycheck > 0) msg += ` ${noPaycheck} colaborador(es) sem contracheque neste mês (suba o PDF primeiro).`;
-      setImportNote(msg); setWizardStep(4);
+      setImportNote(msg); setWizardStep(5);
     } catch (err) {
       setError(`Erro ao importar: ${err.message}`); setImporting(false);
     }
@@ -1243,7 +1244,7 @@ export default function PayrollApp() {
               ))}
             </div>
             <div style={{ padding: "14px 24px", borderTop: "1px solid #E5E2DB", display: "flex", justifyContent: "flex-end" }}>
-              <button onClick={() => setReconcile(null)} style={{ padding: "10px 18px", borderRadius: 8, background: "#1B2A4A", color: "#fff", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>Concluir</button>
+              <button onClick={() => { setReconcile(null); if (wizardStep === 3) setWizardStep(4); }} style={{ padding: "10px 18px", borderRadius: 8, background: "#1B2A4A", color: "#fff", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>Concluir</button>
             </div>
           </div>
         </div>
@@ -1273,7 +1274,7 @@ export default function PayrollApp() {
           <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
           {/* LEFT PANEL */}
           <div style={{ width: 380, borderRight: "1px solid #E5E2DB", display: "flex", flexDirection: "column", background: "#FFFFFF" }}>
-            {wizardStep <= 3 && (
+            {wizardStep <= 4 && (
             <div style={{ padding: 20, borderBottom: "1px solid #E5E2DB" }}>
               {uploading ? (
                 <div style={{ padding: 20, borderRadius: 12, background: "#FFFBEB", border: "1px solid #FCD34D", textAlign: "center" }}>
@@ -1296,7 +1297,15 @@ export default function PayrollApp() {
                   </label>
                   </>)}
                   {paychecks.length > 0 && wizardStep === 3 && (
-                    <label style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: 16, marginTop: 10, borderRadius: 12, border: "2px dashed #86EFAC", background: "#F0FDF4", cursor: "pointer", gap: 6 }}>
+                    <div style={{ borderRadius: 12, border: "2px solid #BFDBFE", background: "#EFF6FF", padding: 16 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2A4A", marginBottom: 4 }}>👥 Conferir colaboradores</div>
+                      <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 12 }}>Veja quem é novo no PDF (complete o e-mail) e quem está cadastrado mas não veio neste mês (desativar ou manter).</div>
+                      <button onClick={openReconcile} style={{ width: "100%", padding: "10px", borderRadius: 8, background: "#1B2A4A", color: "#fff", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Abrir conferência</button>
+                      <button onClick={() => setWizardStep(4)} style={{ width: "100%", padding: "8px", borderRadius: 8, background: "#fff", color: "#1B2A4A", border: "1px solid #CBD5E1", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Tudo certo, continuar → Excel</button>
+                    </div>
+                  )}
+                  {paychecks.length > 0 && wizardStep === 4 && (
+                    <label style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: 16, borderRadius: 12, border: "2px dashed #86EFAC", background: "#F0FDF4", cursor: "pointer", gap: 6 }}>
                       <input type="file" accept=".xls,.xlsx" onChange={handleExcelUpload} style={{ display: "none" }} />
                       <span style={{ fontSize: 24 }}>📊</span>
                       <span style={{ fontSize: 13, fontWeight: 600, color: "#166534" }}>Importar Excel de Proventos</span>
@@ -1319,13 +1328,13 @@ export default function PayrollApp() {
               </div>
             )}
 
-            {paychecks.length > 0 && wizardStep >= 3 && (
+            {paychecks.length > 0 && wizardStep >= 4 && (
               <div style={{ padding: "10px 20px", borderBottom: "1px solid #E5E2DB" }}>
                 <button onClick={openReconcile} style={{ width: "100%", padding: "8px", borderRadius: 8, background: "#fff", color: "#1B2A4A", border: "1px solid #CBD5E1", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>👥 Conferir colaboradores (novos / ausentes)</button>
               </div>
             )}
 
-            {paychecks.length > 0 && wizardStep === 4 && (
+            {paychecks.length > 0 && wizardStep === 5 && (
               <div style={{ padding: "12px 20px", borderBottom: "1px solid #E5E2DB" }}>
                 <input type="text" placeholder="Buscar colaborador..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
                   style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #E5E2DB", fontSize: 13, background: "#F8F7F4", outline: "none", boxSizing: "border-box" }} />
@@ -1377,7 +1386,7 @@ export default function PayrollApp() {
               })}
             </div>
 
-            {stats.reviewed > 0 && wizardStep === 5 && (
+            {stats.reviewed > 0 && wizardStep === 6 && (
               <div style={{ padding: 16, borderTop: "1px solid #E5E2DB" }}>
                 <button onClick={sendBatchEmails} disabled={sending} style={{
                   width: "100%", padding: "12px 20px", borderRadius: 10,
@@ -1394,8 +1403,8 @@ export default function PayrollApp() {
             {!selectedPaycheck ? (
               <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#9CA3AF" }}>
                 <span style={{ fontSize: 56, marginBottom: 16, opacity: 0.5 }}>📋</span>
-                <div style={{ fontSize: 18, fontWeight: 600, color: "#6B7280" }}>{wizardStep <= 2 ? "Suba o PDF do contador" : wizardStep === 3 ? "Importe o Excel da folha" : "Selecione um colaborador"}</div>
-                <div style={{ fontSize: 13, marginTop: 4 }}>{wizardStep <= 2 ? "Escolha o mês e envie o PDF na coluna ao lado" : wizardStep === 3 ? "Use o botão verde, ou clique em \"Revisar\" para pular esta etapa" : "Clique em um nome na lista para pré-visualizar o e-mail"}</div>
+                <div style={{ fontSize: 18, fontWeight: 600, color: "#6B7280" }}>{wizardStep <= 2 ? "Suba o PDF do contador" : wizardStep === 3 ? "Confira os colaboradores" : wizardStep === 4 ? "Importe o Excel da folha" : "Selecione um colaborador"}</div>
+                <div style={{ fontSize: 13, marginTop: 4 }}>{wizardStep <= 2 ? "Escolha o mês e envie o PDF na coluna ao lado" : wizardStep === 3 ? "Veja os novos do PDF e os ausentes do mês na coluna ao lado" : wizardStep === 4 ? "Use o botão verde, ou clique em \"Revisar\" para pular esta etapa" : "Clique em um nome na lista para pré-visualizar o e-mail"}</div>
               </div>
             ) : (
               <div style={{ maxWidth: 680, margin: "0 auto" }}>
