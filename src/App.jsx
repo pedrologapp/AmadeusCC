@@ -45,6 +45,13 @@ const supabase = {
     if (!res.ok) throw new Error(`Supabase delete error: ${res.statusText}`);
     return true;
   },
+  async deleteWhere(table, filters) {
+    const res = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?${filters}`, {
+      method: "DELETE", headers: this.headers,
+    });
+    if (!res.ok) throw new Error(`Supabase delete error: ${res.statusText}`);
+    return true;
+  },
 };
 
 const formatCurrency = (value) =>
@@ -292,16 +299,27 @@ export default function PayrollApp() {
 
   const currentPeriod = periods.find((p) => p.id === currentPeriodId);
   const selectedPaycheck = paychecks.find((p) => p.id === selectedPaycheckId);
-  const selectedCollaborator = selectedPaycheck ? collaborators.find((c) => c.id === selectedPaycheck.collaborator_id) : null;
+  const selectedCollaborator = selectedPaycheck
+    ? (collaborators.find((c) => c.id === selectedPaycheck.collaborator_id) ||
+       allCollaborators.find((c) => c.id === selectedPaycheck.collaborator_id) || null)
+    : null;
   const selectedAdjustments = selectedPaycheckId ? adjustments[selectedPaycheckId] || [] : [];
 
-  const filteredPaychecks = paychecks.filter((pc) => {
-    const collab = collaborators.find((c) => c.id === pc.collaborator_id);
-    if (!collab) return false;
-    const matchesSearch = collab.full_name.toLowerCase().includes(searchTerm.toLowerCase()) || (collab.role || "").toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesFilter = filterStatus === "all" || (filterStatus === "pending_review" && ["extracted", "pending_review"].includes(pc.status)) || pc.status === filterStatus;
-    return matchesSearch && matchesFilter;
-  });
+  // Acha o colaborador do contracheque (ativos primeiro, depois inativos).
+  // NUNCA esconde um contracheque do PDF — sem cadastro vira sinalização visual.
+  const findCollab = (pc) =>
+    collaborators.find((c) => c.id === pc.collaborator_id) ||
+    allCollaborators.find((c) => c.id === pc.collaborator_id) || null;
+
+  const filteredPaychecks = paychecks
+    .filter((pc) => {
+      const collab = findCollab(pc);
+      const name = collab?.full_name || "(sem cadastro)";
+      const matchesSearch = name.toLowerCase().includes(searchTerm.toLowerCase()) || (collab?.role || "").toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesFilter = filterStatus === "all" || (filterStatus === "pending_review" && ["extracted", "pending_review"].includes(pc.status)) || pc.status === filterStatus;
+      return matchesSearch && matchesFilter;
+    })
+    .sort((a, b) => (findCollab(a)?.full_name || "").localeCompare(findCollab(b)?.full_name || "", "pt-BR"));
 
   const stats = {
     total: paychecks.length,
@@ -658,6 +676,34 @@ export default function PayrollApp() {
       setImportNote(msg); setWizardStep(5);
     } catch (err) {
       setError(`Erro ao importar: ${err.message}`); setImporting(false);
+    }
+  };
+
+  // Apaga os contracheques e ajustes do mês para subir o PDF de novo.
+  // O cadastro de colaboradores NÃO é alterado.
+  const redoMonth = async () => {
+    if (!currentPeriodId) return;
+    const enviados = paychecks.filter((p) => p.status === "sent").length;
+    let aviso = `Refazer ${periodLabel}? Todos os ${paychecks.length} contracheques e seus ajustes deste mês serão apagados para você subir o PDF novamente.\n\nO cadastro de colaboradores não muda.`;
+    if (enviados > 0) aviso += `\n\nATENÇÃO: ${enviados} contracheque(s) já foram ENVIADOS por e-mail — refazer apaga esse registro.`;
+    if (!window.confirm(aviso)) return;
+    try {
+      setUploading(true); setUploadProgress("Limpando o mês...");
+      const pcs = await supabase.select("paychecks", `payroll_period_id=eq.${currentPeriodId}`);
+      if (pcs.length > 0) {
+        const ids = pcs.map((p) => p.id).join(",");
+        await supabase.deleteWhere("adjustments", `paycheck_id=in.(${ids})`);
+        await supabase.deleteWhere("email_logs", `paycheck_id=in.(${ids})`).catch(() => {});
+        await supabase.deleteWhere("paychecks", `payroll_period_id=eq.${currentPeriodId}`);
+      }
+      await supabase.update("payroll_periods", currentPeriodId, { status: "processing" });
+      setPaychecks([]); setAdjustments({}); setSelectedPaycheckId(null);
+      await loadPeriodStats();
+      setUploading(false); setUploadProgress("");
+      setWizardStep(2); setImportNote("Mês limpo — suba o PDF novamente.");
+    } catch (err) {
+      setUploading(false); setUploadProgress("");
+      setError(`Erro ao refazer o mês: ${err.message}`);
     }
   };
 
@@ -1332,9 +1378,9 @@ export default function PayrollApp() {
               </div>
             )}
 
-            {paychecks.length > 0 && wizardStep >= 4 && (
+            {paychecks.length > 0 && wizardStep >= 3 && (
               <div style={{ padding: "10px 20px", borderBottom: "1px solid #E5E2DB" }}>
-                <button onClick={openReconcile} style={{ width: "100%", padding: "8px", borderRadius: 8, background: "#fff", color: "#1B2A4A", border: "1px solid #CBD5E1", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>👥 Conferir colaboradores (novos / ausentes)</button>
+                <button onClick={redoMonth} style={{ width: "100%", padding: "7px", borderRadius: 8, background: "#fff", color: "#B91C1C", border: "1px solid #FCA5A5", cursor: "pointer", fontSize: 11, fontWeight: 600 }}>🔄 Refazer mês (apagar contracheques e subir o PDF de novo)</button>
               </div>
             )}
 
@@ -1360,10 +1406,10 @@ export default function PayrollApp() {
                 </div>
               )}
               {filteredPaychecks.map((pc) => {
-                const collab = collaborators.find((c) => c.id === pc.collaborator_id);
-                if (!collab) return null;
+                const collab = findCollab(pc);
                 const pcAdjs = adjustments[pc.id] || [];
                 const hasPresets = (presets[pc.collaborator_id] || []).filter(p => p.is_active).length > 0;
+                const semEmail = collab && !(collab.email || "").trim();
                 return (
                   <div key={pc.id} onClick={() => setSelectedPaycheckId(pc.id)} style={{
                     padding: "14px 20px", borderBottom: "1px solid #F3F0EB", cursor: "pointer",
@@ -1373,8 +1419,11 @@ export default function PayrollApp() {
                   }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                       <div>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A", marginBottom: 2 }}>{collab.full_name}</div>
-                        <div style={{ fontSize: 11, color: "#6B7280" }}>{collab.role}</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: "#1B2A4A", marginBottom: 2 }}>{collab?.full_name || "(sem cadastro)"}</div>
+                        <div style={{ fontSize: 11, color: "#6B7280" }}>{collab?.role}</div>
+                        {!collab && <div style={{ fontSize: 10, fontWeight: 700, color: "#B91C1C", background: "#FEE2E2", display: "inline-block", padding: "2px 6px", borderRadius: 4, marginTop: 3 }}>⚠ sem cadastro</div>}
+                        {semEmail && <div style={{ fontSize: 10, fontWeight: 700, color: "#92400E", background: "#FEF3C7", display: "inline-block", padding: "2px 6px", borderRadius: 4, marginTop: 3 }}>⚠ falta e-mail</div>}
+                        {collab && collab.is_active === false && <div style={{ fontSize: 10, fontWeight: 700, color: "#6B7280", background: "#F3F4F6", display: "inline-block", padding: "2px 6px", borderRadius: 4, marginTop: 3, marginLeft: semEmail ? 4 : 0 }}>inativo</div>}
                       </div>
                       <StatusBadge status={pc.status} />
                     </div>
