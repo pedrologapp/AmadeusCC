@@ -305,6 +305,8 @@ export default function PayrollApp() {
   const [view, setView] = useState("dashboard"); // "dashboard" | "process"
   const [periodStats, setPeriodStats] = useState({});
   const [wizardStep, setWizardStep] = useState(1); // 1..6
+  const [editingNet, setEditingNet] = useState(false); // edição manual do salário líquido
+  const [netInput, setNetInput] = useState("");
 
   // Configurações (Fase 2c): colaboradores + proventos
   const [settingsTab, setSettingsTab] = useState("colaboradores"); // "colaboradores" | "proventos"
@@ -430,6 +432,8 @@ export default function PayrollApp() {
   useEffect(() => {
     if (currentPeriodId) { loadPaychecks(currentPeriodId); setSelectedPaycheckId(null); }
   }, [currentPeriodId]);
+
+  useEffect(() => { setEditingNet(false); setNetInput(""); }, [selectedPaycheckId]);
 
   const handleMonthYearChange = useCallback((month, year) => {
     setRefMonth(month); setRefYear(year);
@@ -854,6 +858,26 @@ export default function PayrollApp() {
 
   const removeAdjustment = async (adjId) => {
     try { await supabase.delete("adjustments", adjId); await loadPaychecks(); } catch (err) { setError(`Erro: ${err.message}`); }
+  };
+
+  // Edição manual do Salário Líquido (quando nem o PDF nem o Excel estão certos).
+  // Aceita "2.236,99", "2236,99" ou "2236.99".
+  const saveNetValue = async () => {
+    if (!selectedPaycheckId) return;
+    let t = String(netInput).replace(/[R$\s]/g, "");
+    if (t.includes(",")) t = t.replace(/\./g, "").replace(",", ".");
+    const v = parseFloat(t);
+    if (!isFinite(v) || v < 0) { setError("Valor inválido — use por exemplo 2.236,99"); return; }
+    try {
+      const adjs = adjustments[selectedPaycheckId] || [];
+      const sum = adjs.reduce((s, a) => s + (a.type === "addition" ? a.value : -a.value), 0);
+      await supabase.update("paychecks", selectedPaycheckId, {
+        extracted_net_value: Math.round(v * 100) / 100,
+        final_value: Math.round((v + sum) * 100) / 100,
+      });
+      await loadPaychecks();
+      setEditingNet(false); setNetInput("");
+    } catch (err) { setError(`Erro ao salvar: ${err.message}`); }
   };
 
   const validatePaycheck = async () => {
@@ -1594,9 +1618,26 @@ export default function PayrollApp() {
                           <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #E5E2DB", fontSize: 14 }}><span>Descontos</span><span style={{ fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: "#DC2626" }}>− {formatCurrency(selectedPaycheck.extracted_deductions)}</span></div>
                         </>
                       )}
-                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, paddingTop: 10, borderTop: "2px solid #CBD5E1", fontSize: 15, fontWeight: 700 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, paddingTop: 10, borderTop: "2px solid #CBD5E1", fontSize: 15, fontWeight: 700 }}>
                         <span style={{ color: "#1B2A4A" }}>Salário Líquido</span>
-                        <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#1B2A4A" }}>{formatCurrency(selectedPaycheck.extracted_net_value)}</span>
+                        {editingNet ? (
+                          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <input autoFocus value={netInput} onChange={(e) => setNetInput(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") saveNetValue(); if (e.key === "Escape") { setEditingNet(false); setNetInput(""); } }}
+                              placeholder="0,00"
+                              style={{ width: 110, padding: "5px 8px", borderRadius: 8, border: "2px solid #2563EB", fontSize: 14, fontWeight: 700, textAlign: "right", outline: "none", fontFamily: "'JetBrains Mono', monospace" }} />
+                            <button onClick={saveNetValue} style={{ padding: "5px 10px", borderRadius: 8, background: "#16A34A", color: "#fff", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>✓</button>
+                            <button onClick={() => { setEditingNet(false); setNetInput(""); }} style={{ padding: "5px 10px", borderRadius: 8, background: "#fff", color: "#6B7280", border: "1px solid #D1D5DB", cursor: "pointer", fontSize: 12 }}>✕</button>
+                          </span>
+                        ) : (
+                          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#1B2A4A" }}>{formatCurrency(selectedPaycheck.extracted_net_value)}</span>
+                            {!["sent"].includes(selectedPaycheck.status) && (
+                              <button title="Corrigir o salário líquido" onClick={() => { setNetInput(String(selectedPaycheck.extracted_net_value ?? "").replace(".", ",")); setEditingNet(true); }}
+                                style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, padding: "0 2px", opacity: 0.6 }}>✏️</button>
+                            )}
+                          </span>
+                        )}
                       </div>
                       {selectedAdjustments.length > 0 && (
                         <div style={{ marginTop: 16, paddingTop: 16, borderTop: "2px dashed #E5E2DB" }}>
