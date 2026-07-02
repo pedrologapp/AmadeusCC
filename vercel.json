@@ -1,6 +1,6 @@
 {
   "functions": {
-    "api/extract-payroll.js": { "maxDuration": 60 }
+    "api/extract-payroll.js": { "maxDuration": 300 }
   },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/$1" },

@@ -539,7 +539,9 @@ export default function PayrollApp() {
       // A IA às vezes falha de forma passageira (sobrecarga/timeout), então cada
       // lote tem 3 tentativas antes de desistir. Erros de plataforma podem vir
       // como objeto — sempre convertemos para texto legível.
-      const BATCH = 6;
+      // Lote pequeno: o proxy (Cloudflare) encerra respostas que passam de ~100s,
+      // e 6 páginas de uma vez estouravam esse tempo.
+      const BATCH = 3;
       const TENTATIVAS = 3;
       const all = [];
       for (let start = 1; start <= numPages; start += BATCH) {
@@ -555,7 +557,13 @@ export default function PayrollApp() {
               body: JSON.stringify({ pdf_url: pdfUrl, pages: batchPages, origin: CONFIG.API_BASE }),
             });
             const raw = await r.text();
-            let d = {}; try { d = JSON.parse(raw); } catch { d = { error: raw.slice(0, 200) }; }
+            let d = {};
+            try { d = JSON.parse(raw); }
+            catch {
+              // Página de erro do Cloudflare/Vercel (HTML) = servidor demorou demais
+              const ehHtml = /^\s*<(!doctype|html)/i.test(raw);
+              d = { error: ehHtml ? `O servidor demorou demais para responder (HTTP ${r.status})` : raw.slice(0, 200) };
+            }
             if (!r.ok) {
               const e = d.error;
               throw new Error(typeof e === "string" && e ? e : e ? JSON.stringify(e).slice(0, 200) : `HTTP ${r.status}`);
