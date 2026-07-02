@@ -42,7 +42,8 @@ module.exports = async (req, res) => {
     const base = origin || `https://${req.headers.host}`;
     const splitUrl = `${base}/api/split-pdf?url=${encodeURIComponent(pdf_url)}&pages=${pages.join(',')}`;
     const pdfResp = await fetch(splitUrl);
-    if (!pdfResp.ok) return res.status(502).json({ error: `Falha ao recortar páginas (${pdfResp.status})` });
+    // status 500 (não 502/504): o Cloudflare troca respostas 502/504 pela página HTML dele e esconde a mensagem
+    if (!pdfResp.ok) return res.status(500).json({ error: `Falha ao recortar páginas (${pdfResp.status})` });
     const pdfBase64 = Buffer.from(await pdfResp.arrayBuffer()).toString('base64');
 
     // 2) Manda o lote (pequeno) pro Claude
@@ -54,8 +55,11 @@ module.exports = async (req, res) => {
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        // claude-sonnet-4-20250514 foi aposentado pela Anthropic (jun/2026)
+        model: 'claude-sonnet-5',
         max_tokens: 8000,
+        // Extração direta: sem "pensamento" (mais rápido e barato; no Sonnet 5 ele viria ligado por padrão)
+        thinking: { type: 'disabled' },
         messages: [{
           role: 'user',
           content: [
@@ -68,11 +72,13 @@ module.exports = async (req, res) => {
 
     if (!claudeResp.ok) {
       const t = await claudeResp.text();
-      return res.status(502).json({ error: `Claude (${claudeResp.status}): ${t.slice(0, 300)}` });
+      return res.status(500).json({ error: `Claude (${claudeResp.status}): ${t.slice(0, 300)}` });
     }
 
     const claudeData = await claudeResp.json();
-    let txt = (claudeData.content?.[0]?.text || '').trim();
+    // Pega o bloco de texto (o primeiro bloco pode não ser texto em modelos novos)
+    const textBlock = (claudeData.content || []).find((b) => b.type === 'text');
+    let txt = (textBlock?.text || '').trim();
     if (txt.startsWith('```json')) txt = txt.slice(7);
     if (txt.startsWith('```')) txt = txt.slice(3);
     if (txt.endsWith('```')) txt = txt.slice(0, -3);
@@ -82,7 +88,7 @@ module.exports = async (req, res) => {
     try {
       employees = JSON.parse(txt);
     } catch (e) {
-      return res.status(502).json({ error: 'Resposta da IA não veio em JSON', raw: txt.slice(0, 300) });
+      return res.status(500).json({ error: 'Resposta da IA não veio em JSON', raw: txt.slice(0, 300) });
     }
 
     // 3) Converte as páginas relativas (1..N do lote) para as páginas absolutas do PDF original
